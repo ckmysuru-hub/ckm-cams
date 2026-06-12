@@ -1,0 +1,59 @@
+name: chessklub-cams
+
+services:
+  mongo:
+    image: mongo:7
+    container_name: cams-mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ ping: 1 }).ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+    container_name: cams-backend
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+    env_file:
+      - ./backend/.env
+    environment:
+      # Override MONGO_URL so it points at the mongo service inside the docker network
+      MONGO_URL: "mongodb://mongo:27017"
+      CORS_ORIGINS: "http://localhost:3000"
+    ports:
+      - "8001:8001"
+    volumes:
+      # Live-reload: edits to ./backend on the host are reflected in the container
+      - ./backend:/app
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: cams-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    env_file:
+      - ./frontend/.env
+    environment:
+      # Override so the browser (running on the host) talks to the host-mapped backend port
+      REACT_APP_BACKEND_URL: "http://localhost:8001"
+      WDS_SOCKET_PORT: "0"
+      CHOKIDAR_USEPOLLING: "true"   # macOS file-watch reliability
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules        # keep container's node_modules, don't mask with host
+
+volumes:
+  mongo_data:
