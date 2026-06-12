@@ -536,7 +536,7 @@ async def student_attendance(sid: str, user: dict = Depends(get_current_user)):
     if not student:
         raise HTTPException(404, "Student not found")
     batch_id = student.get("batch_id")
-    sessions = await db.attendance.find({"batch_id": batch_id}).sort("session_date", -1).to_list(200)
+    sessions = await db.attendance.find({"batch_id": batch_id}).sort("session_date", -1).limit(100).to_list(100)
     history = []
     counts = {"P": 0, "A": 0, "L": 0, "LT": 0, "H": 0}
     for s in sessions:
@@ -844,13 +844,20 @@ async def dashboard_summary(user: dict = Depends(get_current_user)):
     active_students = await db.students.count_documents({"status": "active"})
     total_students = await db.students.count_documents({})
     new_this_month = await db.students.count_documents({"enrollment_date": {"$gte": f"{month_start}-01"}})
-    pending_invoices = await db.invoices.find({"status": {"$in": ["pending", "partial"]}}).to_list(2000)
+    pending_invoices = await db.invoices.find(
+        {"status": {"$in": ["pending", "partial"]}},
+        {"balance": 1, "due_date": 1, "invoice_no": 1, "student_name": 1, "status": 1},
+    ).to_list(2000)
     pending_amount = round(sum(float(i["balance"]) for i in pending_invoices), 2)
     overdue = [i for i in pending_invoices if i.get("due_date", "9999") < today.strftime("%Y-%m-%d")]
     overdue_amount = round(sum(float(i["balance"]) for i in overdue), 2)
 
-    # monthly collection
-    receipts = await db.receipts.find({}, {"created_at": 1, "amount": 1, "mode": 1}).to_list(5000)
+    # monthly collection — last 12 months only
+    cutoff_iso = (today - timedelta(days=370)).isoformat()
+    receipts = await db.receipts.find(
+        {"created_at": {"$gte": cutoff_iso}},
+        {"created_at": 1, "amount": 1, "mode": 1},
+    ).to_list(5000)
     by_month = {}
     by_mode = {}
     for r in receipts:
@@ -863,7 +870,7 @@ async def dashboard_summary(user: dict = Depends(get_current_user)):
 
     # attendance rate last 30 days
     cutoff = (today - timedelta(days=30)).strftime("%Y-%m-%d")
-    sessions = await db.attendance.find({"session_date": {"$gte": cutoff}}).to_list(2000)
+    sessions = await db.attendance.find({"session_date": {"$gte": cutoff}}, {"marks": 1}).to_list(2000)
     p_count = a_count = 0
     for s in sessions:
         for st in (s.get("marks") or {}).values():
