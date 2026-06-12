@@ -424,10 +424,15 @@ async def delete_level(lid: str, _: dict = Depends(require_role("ops_manager")))
 @api.get("/batches")
 async def list_batches(user: dict = Depends(get_current_user)):
     items = await db.batches.find().sort("created_at", -1).to_list(500)
+    pipeline = [
+        {"$match": {"status": "active"}},
+        {"$group": {"_id": "$batch_id", "count": {"$sum": 1}}},
+    ]
+    enrolled_map = {doc["_id"]: doc["count"] async for doc in db.students.aggregate(pipeline)}
     out = []
     for b in items:
         sd = serialize_doc(b)
-        sd["enrolled"] = await db.students.count_documents({"batch_id": sd["id"], "status": "active"})
+        sd["enrolled"] = enrolled_map.get(sd["id"], 0)
         out.append(sd)
     return out
 
