@@ -29,6 +29,10 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from reportlab.pdfgen import canvas as rl_canvas
 
 import requests
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.utils import formataddr
 
 # ---------------------------- Setup ----------------------------
 mongo_url = os.environ['MONGO_URL']
@@ -244,42 +248,108 @@ async def gen_receipt_no() -> str:
     n = await next_counter(f"receipt-{today.year}-{today.month:02d}")
     return f"RCP-{today.year}-{today.month:02d}-{n:04d}"
 
-# ---------------------------- Notifications (log-only mode) ----------------------------
+# ---------------------------- Notifications ----------------------------
 def send_whatsapp(to_phone: str, message: str) -> dict:
-    sid = os.environ.get("TWILIO_ACCOUNT_SID")
-    token = os.environ.get("TWILIO_AUTH_TOKEN")
-    from_wa = os.environ.get("TWILIO_WHATSAPP_FROM")
-    if not (sid and token and from_wa):
+    """Send a WhatsApp message via Meta Cloud API (free-form text).
+    NOTE: Free-form messages only work within the 24-hour customer-care window.
+    For first-contact messages, an approved utility template is required.
+    Falls back to log-only mode when credentials are missing."""
+    token = os.environ.get("WHATSAPP_TOKEN")
+    phone_id = os.environ.get("WHATSAPP_PHONE_NUMBER_ID")
+    version = os.environ.get("WHATSAPP_GRAPH_VERSION", "v21.0")
+    if not (token and phone_id):
         logger.info(f"[WHATSAPP MOCK] to={to_phone} msg={message[:200]}")
         return {"sent": False, "mode": "log", "to": to_phone}
+    # Normalize phone: strip +, spaces, dashes
+    to_norm = (to_phone or "").replace("+", "").replace(" ", "").replace("-", "")
+    url = f"https://graph.facebook.com/{version}/{phone_id}/messages"
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to_norm,
+        "type": "text",
+        "text": {"body": message[:4096]},
+    }
     try:
-        url = f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json"
-        r = requests.post(url, auth=(sid, token), data={
-            "From": f"whatsapp:{from_wa}", "To": f"whatsapp:{to_phone}", "Body": message
-        }, timeout=10)
-        return {"sent": r.ok, "mode": "twilio", "status": r.status_code}
+        r = requests.post(url, headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }, json=payload, timeout=15)
+        ok = r.ok
+        data = {}
+        try:
+            data = r.json()
+        except Exception:
+            data = {"raw": r.text}
+        if not ok:
+            logger.warning(f"WhatsApp send failed [{r.status_code}]: {data}")
+        return {"sent": ok, "mode": "meta_cloud", "status": r.status_code, "response": data}
     except Exception as e:
-        logger.warning(f"WhatsApp send failed: {e}")
+        logger.warning(f"WhatsApp send exception: {e}")
         return {"sent": False, "mode": "error", "error": str(e)}
 
+
+def send_whatsapp_template(to_phone: str, template_name: str, language_code: str,
+                           body_params: List[str]) -> dict:
+    """Send an approved WhatsApp template message (works outside the 24h window)."""
+    token = os.environ.get("WHATSAPP_TOKEN")
+    phone_id = os.environ.get("WHATSAPP_PHONE_NUMBER_ID")
+    version = os.environ.get("WHATSAPP_GRAPH_VERSION", "v21.0")
+    if not (token and phone_id):
+        logger.info(f"[WHATSAPP MOCK TMPL] to={to_phone} tpl={template_name} params={body_params}")
+        return {"sent": False, "mode": "log", "to": to_phone}
+    to_norm = (to_phone or "").replace("+", "").replace(" ", "").replace("-", "")
+    url = f"https://graph.facebook.com/{version}/{phone_id}/messages"
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to_norm,
+        "type": "template",
+        "template": {
+            "name": template_name,
+            "language": {"code": language_code},
+            "components": [{"type": "body",
+                            "parameters": [{"type": "text", "text": str(p)} for p in body_params]}],
+        },
+    }
+    try:
+        r = requests.post(url, headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }, json=payload, timeout=15)
+        ok = r.ok
+        try:
+            data = r.json()
+        except Exception:
+            data = {"raw": r.text}
+        if not ok:
+            logger.warning(f"WhatsApp template send failed [{r.status_code}]: {data}")
+        return {"sent": ok, "mode": "meta_cloud_template", "status": r.status_code, "response": data}
+    except Exception as e:
+        logger.warning(f"WhatsApp template send exception: {e}")
+        return {"sent": False, "mode": "error", "error": str(e)}
+
+
 def send_email(to_email: str, subject: str, html: str) -> dict:
-    api_key = os.environ.get("SENDGRID_API_KEY")
-    from_email = os.environ.get("SENDGRID_FROM_EMAIL")
-    if not (api_key and from_email and to_email):
+    """Send an email via Gmail SMTP using an App Password.
+    Falls back to log-only mode when credentials are missing."""
+    if not to_email:
+        return {"sent": False, "mode": "log", "reason": "no recipient"}
+    gmail_user = os.environ.get("GMAIL_USER")
+    gmail_pass = os.environ.get("GMAIL_APP_PASSWORD")
+    if not (gmail_user and gmail_pass):
         logger.info(f"[EMAIL MOCK] to={to_email} subj={subject}")
         return {"sent": False, "mode": "log", "to": to_email}
     try:
-        r = requests.post("https://api.sendgrid.com/v3/mail/send",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "personalizations": [{"to": [{"email": to_email}]}],
-                "from": {"email": from_email, "name": os.environ.get("ACADEMY_NAME", "Chess Klub")},
-                "subject": subject,
-                "content": [{"type": "text/html", "value": html}],
-            }, timeout=10)
-        return {"sent": r.ok, "mode": "sendgrid", "status": r.status_code}
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = formataddr((os.environ.get("ACADEMY_NAME", "Chess Klub Mysuru"), gmail_user))
+        msg["To"] = to_email
+        msg.attach(MIMEText(html, "html"))
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as server:
+            server.login(gmail_user, gmail_pass.replace(" ", ""))
+            server.sendmail(gmail_user, [to_email], msg.as_string())
+        return {"sent": True, "mode": "gmail_smtp", "to": to_email}
     except Exception as e:
-        logger.warning(f"Email send failed: {e}")
+        logger.warning(f"Gmail SMTP send failed: {e}")
         return {"sent": False, "mode": "error", "error": str(e)}
 
 # ---------------------------- Auth Endpoints ----------------------------
@@ -831,10 +901,58 @@ async def get_academy(user: dict = Depends(get_current_user)):
         "gstin": os.environ.get("ACADEMY_GSTIN"),
         "logo_url": os.environ.get("LOGO_URL"),
         "integrations": {
-            "whatsapp_enabled": bool(os.environ.get("TWILIO_ACCOUNT_SID") and os.environ.get("TWILIO_AUTH_TOKEN") and os.environ.get("TWILIO_WHATSAPP_FROM")),
-            "email_enabled": bool(os.environ.get("SENDGRID_API_KEY") and os.environ.get("SENDGRID_FROM_EMAIL")),
+            "whatsapp_enabled": bool(os.environ.get("WHATSAPP_TOKEN") and os.environ.get("WHATSAPP_PHONE_NUMBER_ID")),
+            "email_enabled": bool(os.environ.get("GMAIL_USER") and os.environ.get("GMAIL_APP_PASSWORD")),
         },
     }
+
+# ---------------------------- WhatsApp Webhook ----------------------------
+@api.get("/whatsapp/webhook")
+async def whatsapp_webhook_verify(request: Request):
+    """Verify endpoint for Meta to confirm webhook ownership."""
+    qp = request.query_params
+    mode = qp.get("hub.mode")
+    token = qp.get("hub.verify_token")
+    challenge = qp.get("hub.challenge")
+    expected = os.environ.get("WHATSAPP_VERIFY_TOKEN")
+    if mode == "subscribe" and token and expected and token == expected:
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse(challenge or "")
+    raise HTTPException(403, "Webhook verification failed")
+
+@api.post("/whatsapp/webhook")
+async def whatsapp_webhook_incoming(request: Request):
+    """Handle incoming WhatsApp events (messages, statuses).
+    Stores inbound messages in db.whatsapp_events for future inbox view."""
+    body = await request.json()
+    try:
+        await db.whatsapp_events.insert_one({
+            "received_at": iso(now_utc()),
+            "payload": body,
+        })
+    except Exception as e:
+        logger.warning(f"failed to persist whatsapp event: {e}")
+    return {"status": "ok"}
+
+# ---------------------------- Notification Self-Test ----------------------------
+class TestNotifyIn(BaseModel):
+    to_phone: Optional[str] = None
+    to_email: Optional[EmailStr] = None
+    message: Optional[str] = "Test message from Chess Klub Mysuru CAMS."
+
+@api.post("/notify/test")
+async def test_notify(payload: TestNotifyIn, _: dict = Depends(require_role("director"))):
+    """Send a test WhatsApp/email to verify integrations are live."""
+    out = {}
+    if payload.to_phone:
+        out["whatsapp"] = send_whatsapp(payload.to_phone, payload.message or "Test")
+    if payload.to_email:
+        out["email"] = send_email(
+            payload.to_email,
+            f"Test email from {os.environ.get('ACADEMY_NAME', 'CAMS')}",
+            f"<p>{payload.message}</p><p style='color:#777'>Sent from Chess Klub Mysuru CAMS.</p>",
+        )
+    return out
 
 # ---------------------------- Mount ----------------------------
 app.include_router(api)

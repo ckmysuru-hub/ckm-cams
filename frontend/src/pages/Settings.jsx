@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { UserPlus, Trash2, CheckCircle2, XCircle } from "lucide-react";
+import { UserPlus, Trash2, CheckCircle2, XCircle, Send, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 
 const ROLES = ["director","ops_manager","coach","front_desk","finance"];
@@ -17,6 +17,9 @@ export default function Settings() {
   const [users, setUsers] = useState([]);
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ name:"", email:"", password:"", role:"front_desk" });
+  const [testForm, setTestForm] = useState({ to_phone: "", to_email: "", message: "Hello from Chess Klub Mysuru CAMS — this is a test message." });
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState(null);
 
   useEffect(() => {
     api.get("/settings/academy").then((r)=>setAcademy(r.data));
@@ -39,6 +42,28 @@ export default function Settings() {
     api.get("/users").then((r)=>setUsers(r.data));
   };
 
+  const sendTest = async (e) => {
+    e.preventDefault();
+    if (!testForm.to_phone && !testForm.to_email) {
+      toast.error("Enter a WhatsApp number or email to test");
+      return;
+    }
+    setTesting(true); setTestResult(null);
+    try {
+      const payload = { message: testForm.message };
+      if (testForm.to_phone) payload.to_phone = testForm.to_phone;
+      if (testForm.to_email) payload.to_email = testForm.to_email;
+      const { data } = await api.post("/notify/test", payload);
+      setTestResult(data);
+      const wa = data.whatsapp?.sent;
+      const em = data.email?.sent;
+      if (wa || em) toast.success(`Test sent · ${wa?"WhatsApp ✓":""} ${em?"Email ✓":""}`);
+      else toast.error("Test failed — check details below");
+    } catch (ex) {
+      toast.error(formatApiError(ex.response?.data?.detail));
+    } finally { setTesting(false); }
+  };
+
   return (
     <>
       <PageHeader eyebrow="Configuration" title="Settings" subtitle="Academy details, integrations and team access." />
@@ -55,13 +80,66 @@ export default function Settings() {
         </div>
         <div className="ck-card-elevated p-5" data-testid="integrations-card">
           <div className="text-xs uppercase tracking-wider font-semibold text-[var(--ck-muted)] mb-2">Integrations</div>
-          <IntegrationRow label="WhatsApp (Twilio)" enabled={academy?.integrations?.whatsapp_enabled} />
-          <IntegrationRow label="Email (SendGrid)" enabled={academy?.integrations?.email_enabled} />
+          <IntegrationRow label="WhatsApp · Meta Cloud API" enabled={academy?.integrations?.whatsapp_enabled} />
+          <IntegrationRow label="Email · Gmail SMTP" enabled={academy?.integrations?.email_enabled} />
           <div className="text-xs text-[var(--ck-muted)] mt-4 leading-relaxed">
             When integrations are disabled, the app runs in <b>log-only mode</b> — all reminders are recorded in backend logs but not actually sent. Add your keys in backend <code>.env</code> to enable real sending.
           </div>
         </div>
       </div>
+
+      {user?.role === "director" && (
+        <div className="ck-card-elevated p-5 mb-6" data-testid="notify-test-card">
+          <div className="text-xs uppercase tracking-wider font-semibold text-[var(--ck-muted)]">Live test</div>
+          <div className="ck-display text-xl font-semibold mb-1">Send a test notification</div>
+          <p className="text-sm text-[var(--ck-muted)] mb-4">
+            Send a quick WhatsApp + email to verify the integrations are working end-to-end.
+            {academy?.integrations?.whatsapp_enabled && <> WhatsApp messages only deliver to <b>test recipients added in Meta dashboard</b> while the default test number is in use.</>}
+          </p>
+          <form onSubmit={sendTest} className="grid md:grid-cols-3 gap-3" data-testid="notify-test-form">
+            <div>
+              <label className="text-xs font-semibold uppercase tracking-wider text-[var(--ck-muted)]">WhatsApp Number</label>
+              <Input className="mt-1.5" placeholder="+91..." value={testForm.to_phone}
+                     onChange={(e)=>setTestForm({...testForm, to_phone: e.target.value})}
+                     data-testid="test-phone" />
+            </div>
+            <div>
+              <label className="text-xs font-semibold uppercase tracking-wider text-[var(--ck-muted)]">Email</label>
+              <Input className="mt-1.5" type="email" placeholder="you@example.com" value={testForm.to_email}
+                     onChange={(e)=>setTestForm({...testForm, to_email: e.target.value})}
+                     data-testid="test-email" />
+            </div>
+            <div className="flex items-end">
+              <button type="submit" disabled={testing} className="ck-btn-primary w-full flex items-center justify-center gap-2" data-testid="test-submit">
+                {testing ? <Loader2 size={14} className="animate-spin"/> : <Send size={14}/>}
+                {testing ? "Sending…" : "Send test"}
+              </button>
+            </div>
+            <div className="md:col-span-3">
+              <label className="text-xs font-semibold uppercase tracking-wider text-[var(--ck-muted)]">Message</label>
+              <Input className="mt-1.5" value={testForm.message}
+                     onChange={(e)=>setTestForm({...testForm, message: e.target.value})} />
+            </div>
+          </form>
+
+          {testResult && (
+            <div className="mt-4 grid md:grid-cols-2 gap-3 text-xs" data-testid="test-result">
+              {testResult.whatsapp && (
+                <div className={`p-3 rounded-lg border ${testResult.whatsapp.sent ? "bg-green-50 border-green-200" : "bg-red-50 border-red-200"}`}>
+                  <div className="font-semibold mb-1">WhatsApp · {testResult.whatsapp.sent ? "✓ sent" : "✗ failed"}</div>
+                  <pre className="whitespace-pre-wrap break-all text-[10px] text-[var(--ck-muted)]">{JSON.stringify(testResult.whatsapp, null, 2)}</pre>
+                </div>
+              )}
+              {testResult.email && (
+                <div className={`p-3 rounded-lg border ${testResult.email.sent ? "bg-green-50 border-green-200" : "bg-red-50 border-red-200"}`}>
+                  <div className="font-semibold mb-1">Email · {testResult.email.sent ? "✓ sent" : "✗ failed"}</div>
+                  <pre className="whitespace-pre-wrap break-all text-[10px] text-[var(--ck-muted)]">{JSON.stringify(testResult.email, null, 2)}</pre>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {user?.role === "director" && (
         <div className="ck-card-elevated p-2">
