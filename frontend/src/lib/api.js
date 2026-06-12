@@ -22,4 +22,5 @@ export function formatApiError(detail) {
 }
 
 export const LOGO_URL =
+  process.env.REACT_APP_LOGO_URL ||
   "https://customer-assets.emergentagent.com/job_ck-mysuru-portal/artifacts/5ft1s8b1_CK%20Logo.png";

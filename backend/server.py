@@ -845,7 +845,7 @@ async def dashboard_summary(user: dict = Depends(get_current_user)):
     overdue_amount = round(sum(float(i["balance"]) for i in overdue), 2)
 
     # monthly collection
-    receipts = await db.receipts.find().to_list(5000)
+    receipts = await db.receipts.find({}, {"created_at": 1, "amount": 1, "mode": 1}).to_list(5000)
     by_month = {}
     by_mode = {}
     for r in receipts:
