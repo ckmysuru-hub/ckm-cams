@@ -3,13 +3,14 @@ import { useAuth } from "@/contexts/AuthContext";
 import { Logo } from "@/components/Brand";
 import {
   LayoutDashboard, Users, Calendar, ClipboardCheck, GraduationCap,
-  ReceiptText, Settings, LogOut, FileText, ScanLine
+  ReceiptText, Settings, LogOut, FileText, ScanLine, Inbox
 } from "lucide-react";
 import { Toaster } from "@/components/ui/sonner";
 
 const NAV = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true, testid: "nav-dashboard" },
   { to: "/students", label: "Students", icon: Users, testid: "nav-students" },
+  { to: "/registrations", label: "Registrations", icon: Inbox, testid: "nav-registrations" },
   { to: "/batches", label: "Batches", icon: Calendar, testid: "nav-batches" },
   { to: "/attendance", label: "Attendance", icon: ClipboardCheck, testid: "nav-attendance" },
   { to: "/levels", label: "Levels & Fees", icon: GraduationCap, testid: "nav-levels" },

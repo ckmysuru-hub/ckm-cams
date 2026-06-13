@@ -6,8 +6,10 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Plus, Search, Pencil, Trash2 } from "lucide-react";
+import { Plus, Search, Pencil, Trash2, Download, Upload, Filter } from "lucide-react";
 import { toast } from "sonner";
+import { downloadCsv, parseCsv } from "@/lib/csv";
+import { SortableHead, applySort } from "@/components/SortableHead";
 
 const empty = {
   full_name: "", dob: "", gender: "male", parent_name: "", parent_whatsapp: "",
@@ -33,6 +35,11 @@ export default function Students() {
   const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState(empty);
   const [submitting, setSubmitting] = useState(false);
+  const [sort, setSort] = useState({ key: "created_at", dir: "desc" });
+  const [filterBatch, setFilterBatch] = useState("all");
+  const [filterStatus, setFilterStatus] = useState("all");
+  const [filterSub, setFilterSub] = useState("all");
+  const [importing, setImporting] = useState(false);
 
   const load = () => api.get("/students", { params: q ? { q } : {} }).then((r) => setItems(r.data));
   useEffect(() => { load(); }, [q]);
@@ -69,6 +76,72 @@ export default function Students() {
       toast.success("Student deleted");
       load();
     } catch (ex) { toast.error(formatApiError(ex.response?.data?.detail)); }
+  };
+
+  // Derived list: filter + sort
+  const batchById = Object.fromEntries(batches.map((b) => [b.id, b.name]));
+  const filtered = items.filter((s) => {
+    if (filterBatch !== "all" && s.batch_id !== filterBatch) return false;
+    if (filterStatus !== "all" && s.status !== filterStatus) return false;
+    if (filterSub !== "all" && (s.subscription_status || "none") !== filterSub) return false;
+    return true;
+  });
+  const sorted = applySort(filtered, sort);
+
+  const exportCsv = () => {
+    const rows = sorted.map((s) => ({
+      student_code: s.student_code,
+      full_name: s.full_name,
+      dob: s.dob || "",
+      gender: s.gender || "",
+      parent_name: s.parent_name,
+      parent_whatsapp: s.parent_whatsapp,
+      parent_email: s.parent_email || "",
+      address: s.address || "",
+      batch: batchById[s.batch_id] || "",
+      payment_plan: s.payment_plan || "",
+      status: s.status || "",
+      subscription_end: s.subscription_end || "",
+      enrollment_date: s.enrollment_date || "",
+    }));
+    if (!rows.length) { toast.error("No students to export"); return; }
+    downloadCsv(rows, `chessklub-students-${new Date().toISOString().slice(0,10)}.csv`);
+    toast.success(`Exported ${rows.length} student${rows.length === 1 ? "" : "s"}`);
+  };
+
+  const onImport = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setImporting(true);
+    try {
+      const text = await file.text();
+      const rows = parseCsv(text);
+      if (!rows.length) { toast.error("CSV appears empty"); return; }
+      const { data } = await api.post("/students/import", { rows });
+      const okMsg = `Imported ${data.created} student${data.created === 1 ? "" : "s"}`;
+      if (data.errors?.length) {
+        toast.warning(`${okMsg} · ${data.errors.length} row${data.errors.length === 1 ? "" : "s"} skipped`);
+        console.warn("Import errors:", data.errors);
+      } else {
+        toast.success(okMsg);
+      }
+      load();
+    } catch (ex) {
+      toast.error(formatApiError(ex.response?.data?.detail) || "Import failed");
+    } finally { setImporting(false); }
+  };
+
+  const downloadTemplate = () => {
+    downloadCsv(
+      [{
+        full_name: "Sample Kid", dob: "2015-04-12", gender: "male",
+        parent_name: "Parent", parent_whatsapp: "+919876543210", parent_email: "parent@example.com",
+        address: "Mysuru", payment_plan: "monthly", level_code: "BEG", batch_name: "Monday Evening",
+        concession_pct: "0", referred_by: "Friend", enrollment_date: "",
+      }],
+      "students-import-template.csv",
+    );
   };
 
   return (
@@ -158,34 +231,70 @@ export default function Students() {
         }
       />
 
-      <div className="ck-card-elevated p-4 mb-4 flex items-center gap-3">
-        <Search size={16} className="text-[var(--ck-muted)]" />
-        <input
-          data-testid="student-search"
-          placeholder="Search by name…"
-          value={q}
-          onChange={(e)=>setQ(e.target.value)}
-          className="flex-1 outline-none bg-transparent text-sm"
-        />
-        <span className="text-xs text-[var(--ck-muted)]">{items.length} students</span>
+      <div className="ck-card-elevated p-4 mb-4 flex flex-wrap items-center gap-3" data-testid="students-toolbar">
+        <div className="flex items-center gap-2 flex-1 min-w-[220px]">
+          <Search size={16} className="text-[var(--ck-muted)]" />
+          <input
+            data-testid="student-search"
+            placeholder="Search by name…"
+            value={q}
+            onChange={(e)=>setQ(e.target.value)}
+            className="flex-1 outline-none bg-transparent text-sm"
+          />
+        </div>
+        <Select value={filterBatch} onValueChange={setFilterBatch}>
+          <SelectTrigger className="w-[160px] h-9" data-testid="filter-batch"><Filter size={12} className="mr-1"/><SelectValue placeholder="Batch" /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All batches</SelectItem>
+            {batches.map((b)=>(<SelectItem key={b.id} value={b.id}>{b.name}</SelectItem>))}
+          </SelectContent>
+        </Select>
+        <Select value={filterStatus} onValueChange={setFilterStatus}>
+          <SelectTrigger className="w-[140px] h-9" data-testid="filter-status"><SelectValue placeholder="Status" /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All status</SelectItem>
+            <SelectItem value="active">Active</SelectItem>
+            <SelectItem value="inactive">Inactive</SelectItem>
+            <SelectItem value="dropped">Dropped</SelectItem>
+          </SelectContent>
+        </Select>
+        <Select value={filterSub} onValueChange={setFilterSub}>
+          <SelectTrigger className="w-[150px] h-9" data-testid="filter-sub"><SelectValue placeholder="Subscription" /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All subscriptions</SelectItem>
+            <SelectItem value="active">Active</SelectItem>
+            <SelectItem value="expiring_soon">Expiring soon</SelectItem>
+            <SelectItem value="expired">Expired</SelectItem>
+            <SelectItem value="none">No subscription</SelectItem>
+          </SelectContent>
+        </Select>
+        <button onClick={exportCsv} className="ck-btn-ghost text-xs flex items-center gap-1" data-testid="export-csv">
+          <Download size={12}/> Export
+        </button>
+        <label className="ck-btn-ghost text-xs flex items-center gap-1 cursor-pointer" data-testid="import-csv">
+          <Upload size={12}/> {importing ? "Importing…" : "Import"}
+          <input type="file" accept=".csv,text/csv" hidden onChange={onImport} disabled={importing} />
+        </label>
+        <button onClick={downloadTemplate} className="text-[11px] text-[var(--ck-muted)] hover:text-[var(--ck-orange)] underline" data-testid="csv-template">template</button>
+        <span className="text-xs text-[var(--ck-muted)] ml-1">{sorted.length} of {items.length}</span>
       </div>
 
       <div className="ck-card-elevated p-2">
         <table className="w-full ck-table text-sm" data-testid="students-table">
           <thead>
             <tr className="text-left">
-              <th className="px-4 py-3">Code</th>
-              <th>Name</th>
+              <SortableHead className="px-4 py-3" label="Code" sortKey="student_code" sort={sort} onSort={setSort} />
+              <SortableHead label="Name" sortKey="full_name" sort={sort} onSort={setSort} />
               <th>Parent</th>
               <th>WhatsApp</th>
-              <th>Plan</th>
-              <th>Subscription</th>
+              <SortableHead label="Plan" sortKey="payment_plan" sort={sort} onSort={setSort} />
+              <SortableHead label="Subscription" sortKey="subscription_end" sort={sort} onSort={setSort} />
               <th>Status</th>
               <th className="text-right pr-4">Actions</th>
             </tr>
           </thead>
           <tbody>
-            {items.map((s) => (
+            {sorted.map((s) => (
               <tr key={s.id}>
                 <td className="px-4 py-3 font-mono text-xs">{s.student_code}</td>
                 <td>
@@ -224,8 +333,8 @@ export default function Students() {
                 </td>
               </tr>
             ))}
-            {!items.length && (
-              <tr><td colSpan="8" className="text-center text-[var(--ck-muted)] py-10">No students yet. Enroll your first.</td></tr>
+            {!sorted.length && (
+              <tr><td colSpan="8" className="text-center text-[var(--ck-muted)] py-10">No students match the current filters.</td></tr>
             )}
           </tbody>
         </table>

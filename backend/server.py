@@ -225,6 +225,26 @@ async def startup():
         await db.users.update_one({"_id": existing["_id"]},
                                   {"$set": {"password_hash": hash_password(admin_pw)}})
 
+    # One-time migration: renumber students to CKM-00001 sorted by enrollment_date
+    migrated = await db.counters.find_one({"key": "student-ckm-migrated"})
+    if not migrated:
+        students = await db.students.find({}).sort([("enrollment_date", 1), ("created_at", 1)]).to_list(10000)
+        for i, s in enumerate(students, start=1):
+            new_code = f"CKM-{i:05d}"
+            await db.students.update_one({"_id": s["_id"]}, {"$set": {"student_code": new_code}})
+        await db.counters.update_one(
+            {"key": "student-ckm"},
+            {"$set": {"value": len(students)}},
+            upsert=True,
+        )
+        await db.counters.update_one(
+            {"key": "student-ckm-migrated"},
+            {"$set": {"value": 1, "at": iso(now_utc()), "count": len(students)}},
+            upsert=True,
+        )
+        if students:
+            logger.info(f"Migrated {len(students)} students to CKM-NNNNN format")
+
 @app.on_event("shutdown")
 async def shutdown():
     client.close()
@@ -238,8 +258,8 @@ async def next_counter(key: str) -> int:
     return doc["value"]
 
 async def gen_student_code() -> str:
-    n = await next_counter(f"student-{datetime.now().year}")
-    return f"STU-{datetime.now().year}-{n:04d}"
+    n = await next_counter("student-ckm")
+    return f"CKM-{n:05d}"
 
 async def gen_invoice_no() -> str:
     today = datetime.now()
@@ -1291,6 +1311,256 @@ async def portal_receipt_pdf(token: str, rid: str):
     pdf = _build_pdf("PAYMENT RECEIPT", r["receipt_no"], r["created_at"][:10], student_lines, rows, totals, footer)
     return StreamingResponse(io.BytesIO(pdf), media_type="application/pdf",
                              headers={"Content-Disposition": f'inline; filename="{r["receipt_no"]}.pdf"'})
+
+# ---------------------------- Pending balance ----------------------------
+@api.get("/students/{sid}/pending-balance")
+async def student_pending_balance(sid: str, user: dict = Depends(get_current_user)):
+    invoices = await db.invoices.find(
+        {"student_id": sid, "status": {"$in": ["pending", "partial"]}},
+        {"invoice_no": 1, "period": 1, "balance": 1, "due_date": 1},
+    ).to_list(200)
+    total = round(sum(float(i.get("balance", 0)) for i in invoices), 2)
+    return {
+        "total_balance": total,
+        "open_invoice_count": len(invoices),
+        "invoices": [serialize_doc(i) for i in invoices],
+    }
+
+# ---------------------------- Monthly billing run ----------------------------
+class MonthlyRunIn(BaseModel):
+    period: str  # "2026-03"
+    due_date: str  # YYYY-MM-DD
+    include_pending: bool = True
+    plans: Optional[List[str]] = None  # e.g. ["monthly"] — defaults to all
+
+@api.post("/billing/monthly-run")
+async def monthly_billing_run(payload: MonthlyRunIn, user: dict = Depends(require_role("finance", "ops_manager"))):
+    # Skip students who already have an invoice for this period
+    existing = await db.invoices.find({"period": payload.period}, {"student_id": 1}).to_list(5000)
+    already_billed = {x["student_id"] for x in existing}
+
+    flt = {"status": "active"}
+    if payload.plans:
+        flt["payment_plan"] = {"$in": payload.plans}
+    students = await db.students.find(flt).to_list(5000)
+
+    levels = await db.levels.find().to_list(500)
+    level_by_id = {str(l["_id"]): l for l in levels}
+
+    created, skipped = [], []
+    for s in students:
+        sid_str = str(s["_id"])
+        if sid_str in already_billed:
+            skipped.append({"student_id": sid_str, "reason": "already_billed"})
+            continue
+        if not s.get("level_id"):
+            skipped.append({"student_id": sid_str, "reason": "no_level"})
+            continue
+        lv = level_by_id.get(s["level_id"])
+        if not lv:
+            skipped.append({"student_id": sid_str, "reason": "level_missing"})
+            continue
+        plan = s.get("payment_plan", "monthly")
+        fee_field = {"monthly": "monthly_fee", "quarterly": "quarterly_fee", "annual": "annual_fee"}[plan]
+        fee_amt = float(lv.get(fee_field, 0) or 0)
+        if fee_amt <= 0:
+            skipped.append({"student_id": sid_str, "reason": "no_fee"})
+            continue
+        items = [{"description": f"{lv['name']} - {plan} fee ({payload.period})", "amount": fee_amt}]
+
+        # Carry-over: include all pending balances from previous periods
+        if payload.include_pending:
+            pending = await db.invoices.find(
+                {"student_id": sid_str, "status": {"$in": ["pending", "partial"]}, "period": {"$ne": payload.period}},
+                {"balance": 1, "invoice_no": 1, "period": 1},
+            ).to_list(50)
+            for p in pending:
+                if float(p.get("balance", 0)) > 0:
+                    items.append({
+                        "description": f"Outstanding from {p.get('period')} (Inv {p.get('invoice_no')})",
+                        "amount": float(p["balance"]),
+                    })
+
+        inv_payload = InvoiceIn(
+            student_id=sid_str, period=payload.period, due_date=payload.due_date,
+            items=[InvoiceItem(**i) for i in items], notes="Auto-generated by monthly run",
+        )
+        inv = await _build_invoice_doc(inv_payload, user)
+        res = await db.invoices.insert_one(inv)
+        created.append({"student_id": sid_str, "invoice_no": inv["invoice_no"], "amount": inv["amount"]})
+
+    return {"created": created, "skipped": skipped, "total_created": len(created)}
+
+# ---------------------------- Open Registration (public) ----------------------------
+class RegistrationIn(BaseModel):
+    full_name: str
+    dob: Optional[str] = None
+    gender: Optional[str] = None
+    parent_name: str
+    parent_whatsapp: str
+    parent_email: Optional[EmailStr] = None
+    address: Optional[str] = ""
+    level_preference: Optional[str] = None  # level code or free text
+    referred_by: Optional[str] = ""
+    notes: Optional[str] = ""
+
+@api.get("/registrations/public/meta")
+async def registration_meta():
+    """Public endpoint to list level options for the registration form."""
+    levels = await db.levels.find({"status": "active"}, {"name": 1, "code": 1, "program": 1}).to_list(100)
+    return {
+        "academy": {
+            "name": os.environ.get("ACADEMY_NAME"),
+            "phone": os.environ.get("ACADEMY_PHONE"),
+            "email": os.environ.get("ACADEMY_EMAIL"),
+            "logo_url": os.environ.get("LOGO_URL"),
+        },
+        "levels": [serialize_doc(l) for l in levels],
+    }
+
+@api.post("/registrations")
+async def create_registration(payload: RegistrationIn):
+    """PUBLIC — anyone can submit a registration request from /register."""
+    doc = payload.model_dump()
+    doc["status"] = "pending"
+    doc["created_at"] = iso(now_utc())
+    res = await db.registrations.insert_one(doc)
+    saved = serialize_doc({**doc, "_id": res.inserted_id})
+    # Acknowledge receipt to parent
+    if saved.get("parent_whatsapp"):
+        send_whatsapp(saved["parent_whatsapp"],
+                      f"Thank you {saved['parent_name']}! We've received your registration for {saved['full_name']} at Chess Klub Mysuru. Our team will confirm shortly.")
+    if saved.get("parent_email"):
+        send_email(saved["parent_email"], "Registration received — Chess Klub Mysuru",
+                   f"<p>Dear {saved['parent_name']},</p><p>We've received your registration for <b>{saved['full_name']}</b>. Our team will review and confirm shortly.</p>")
+    return {"id": saved["id"], "status": "received"}
+
+@api.get("/registrations")
+async def list_registrations(status: Optional[str] = "pending", _: dict = Depends(get_current_user)):
+    flt = {}
+    if status and status != "all":
+        flt["status"] = status
+    items = await db.registrations.find(flt).sort("created_at", -1).to_list(500)
+    return [serialize_doc(x) for x in items]
+
+class RegistrationConfirmIn(BaseModel):
+    level_id: str
+    batch_id: Optional[str] = None
+    payment_plan: str = "monthly"
+    concession_pct: float = 0
+    enrollment_date: Optional[str] = None
+
+@api.post("/registrations/{rid}/confirm")
+async def confirm_registration(rid: str, payload: RegistrationConfirmIn,
+                               user: dict = Depends(require_role("ops_manager", "front_desk"))):
+    reg = await db.registrations.find_one({"_id": ObjectId(rid)})
+    if not reg:
+        raise HTTPException(404, "Registration not found")
+    if reg.get("status") == "confirmed":
+        raise HTTPException(400, "Already confirmed")
+    student_doc = {
+        "full_name": reg["full_name"],
+        "dob": reg.get("dob"),
+        "gender": reg.get("gender") or "other",
+        "parent_name": reg["parent_name"],
+        "parent_whatsapp": reg["parent_whatsapp"],
+        "parent_email": reg.get("parent_email"),
+        "address": reg.get("address", ""),
+        "level_id": payload.level_id,
+        "batch_id": payload.batch_id or None,
+        "payment_plan": payload.payment_plan,
+        "concession_pct": payload.concession_pct,
+        "referred_by": reg.get("referred_by", ""),
+        "status": "active",
+        "student_code": await gen_student_code(),
+        "enrollment_date": payload.enrollment_date or date.today().isoformat(),
+        "created_at": iso(now_utc()),
+        "created_by": user["id"],
+        "registration_id": rid,
+    }
+    res = await db.students.insert_one(student_doc)
+    await db.registrations.update_one(
+        {"_id": ObjectId(rid)},
+        {"$set": {"status": "confirmed", "confirmed_at": iso(now_utc()),
+                  "confirmed_by": user["id"], "student_id": str(res.inserted_id)}},
+    )
+    # Welcome notifications
+    if student_doc.get("parent_whatsapp"):
+        send_whatsapp(student_doc["parent_whatsapp"],
+                      f"Welcome to {os.environ.get('ACADEMY_NAME')}! {student_doc['full_name']} has been confirmed. Student ID: {student_doc['student_code']}. We'll see you at the board!")
+    if student_doc.get("parent_email"):
+        send_email(
+            student_doc["parent_email"],
+            f"Enrolment confirmed — {os.environ.get('ACADEMY_NAME')}",
+            f"<p>Dear {student_doc['parent_name']},</p>"
+            f"<p>We're delighted to confirm <b>{student_doc['full_name']}</b>'s enrolment. "
+            f"Student ID: <b>{student_doc['student_code']}</b>.</p>"
+            f"<p>See you at the board!</p>",
+        )
+    return {"id": str(res.inserted_id), "student_code": student_doc["student_code"]}
+
+@api.delete("/registrations/{rid}")
+async def reject_registration(rid: str, _: dict = Depends(require_role("ops_manager", "front_desk"))):
+    await db.registrations.update_one(
+        {"_id": ObjectId(rid)},
+        {"$set": {"status": "rejected", "rejected_at": iso(now_utc())}},
+    )
+    return {"ok": True}
+
+# ---------------------------- Students CSV import ----------------------------
+class StudentImportRow(BaseModel):
+    rows: List[dict]
+
+@api.post("/students/import")
+async def import_students(payload: StudentImportRow, user: dict = Depends(require_role("ops_manager", "front_desk"))):
+    """Bulk import students. Expected fields per row:
+    full_name, parent_name, parent_whatsapp, parent_email, dob, gender, address,
+    payment_plan (monthly|quarterly|annual), level_code, batch_name, enrollment_date.
+    Missing optional fields default to empty/none."""
+    levels = await db.levels.find().to_list(500)
+    batches = await db.batches.find().to_list(500)
+    level_by_code = {(l.get("code") or "").upper(): str(l["_id"]) for l in levels}
+    batch_by_name = {(b.get("name") or "").lower(): str(b["_id"]) for b in batches}
+
+    created, errors = [], []
+    for idx, row in enumerate(payload.rows, start=1):
+        try:
+            full_name = (row.get("full_name") or "").strip()
+            parent_name = (row.get("parent_name") or "").strip()
+            parent_whatsapp = (row.get("parent_whatsapp") or "").strip()
+            if not full_name or not parent_name or not parent_whatsapp:
+                errors.append({"row": idx, "reason": "full_name / parent_name / parent_whatsapp required"})
+                continue
+            level_id = level_by_code.get((row.get("level_code") or "").upper())
+            batch_id = batch_by_name.get((row.get("batch_name") or "").lower())
+            email_val = (row.get("parent_email") or "").strip() or None
+            plan = (row.get("payment_plan") or "monthly").strip().lower()
+            if plan not in ("monthly", "quarterly", "annual"):
+                plan = "monthly"
+            doc = {
+                "full_name": full_name,
+                "dob": (row.get("dob") or "").strip() or None,
+                "gender": (row.get("gender") or "other").strip().lower(),
+                "parent_name": parent_name,
+                "parent_whatsapp": parent_whatsapp,
+                "parent_email": email_val,
+                "address": (row.get("address") or "").strip(),
+                "level_id": level_id,
+                "batch_id": batch_id,
+                "payment_plan": plan,
+                "concession_pct": float(row.get("concession_pct") or 0),
+                "referred_by": (row.get("referred_by") or "").strip(),
+                "status": "active",
+                "student_code": await gen_student_code(),
+                "enrollment_date": (row.get("enrollment_date") or "").strip() or date.today().isoformat(),
+                "created_at": iso(now_utc()),
+                "created_by": user["id"],
+            }
+            res = await db.students.insert_one(doc)
+            created.append({"id": str(res.inserted_id), "student_code": doc["student_code"], "full_name": full_name})
+        except Exception as e:
+            errors.append({"row": idx, "reason": str(e)})
+    return {"created": len(created), "errors": errors, "details": created}
 
 # ---------------------------- Mount ----------------------------
 app.include_router(api)

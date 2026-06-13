@@ -14,6 +14,8 @@ import Receipts from "@/pages/Receipts";
 import Settings from "@/pages/Settings";
 import Kiosk from "@/pages/Kiosk";
 import ParentPortal from "@/pages/ParentPortal";
+import Register from "@/pages/Register";
+import Registrations from "@/pages/Registrations";
 
 function Protected({ children }) {
   const { user, ready } = useAuth();
@@ -30,6 +32,7 @@ function App() {
           <Route path="/login" element={<Login />} />
           <Route path="/kiosk" element={<Kiosk />} />
           <Route path="/portal/:token" element={<ParentPortal />} />
+          <Route path="/register" element={<Register />} />
           <Route element={<Protected><Layout /></Protected>}>
             <Route path="/" element={<Dashboard />} />
             <Route path="/students" element={<Students />} />
@@ -39,6 +42,7 @@ function App() {
             <Route path="/levels" element={<Levels />} />
             <Route path="/billing" element={<Billing />} />
             <Route path="/receipts" element={<Receipts />} />
+            <Route path="/registrations" element={<Registrations />} />
             <Route path="/settings" element={<Settings />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
