@@ -19,14 +19,18 @@ Theme: White, Orange (#F45B2A), Black. Uses the uploaded knight logo across UI, 
 ## Implemented (as of Feb 2026)
 - Auth: `/api/auth/login`, `/me`, `/logout` with role-aware JWT.
 - Students: CRUD + auto `STU-YYYY-NNNN` code, search, list, detail, edit, delete.
-- Batches: CRUD with enrolled count, schedule days picker, edit/delete.
+- Batches: CRUD with enrolled count via single aggregation, schedule days picker, edit/delete.
 - Levels & Fees: CRUD with admission/monthly/quarterly/annual/exam/material/penalty fees, edit/delete.
 - Attendance: per-batch session marking (P/A/L/LT/H), upsert idempotency, student summary % API.
-- Billing: invoice generation with `INV-YYYY-MM-NNNN`, line items, level→fee auto-fill, reminder API (mock log mode), payment recording with `RCP-YYYY-MM-NNNN` receipt.
-- PDFs: branded invoice & receipt PDFs via reportlab (with logo, orange band, academy header).
-- Dashboard: active students, this-month revenue, pending dues, overdue, revenue trend (6 months), payment-mode pie, pending invoices table.
+- Billing: invoice generation with `INV-YYYY-MM-NNNN`, line items, level→fee auto-fill, reminder API, payment recording with `RCP-YYYY-MM-NNNN` receipt.
+- PDFs: branded invoice & receipt PDFs via reportlab (logo, orange band, academy header).
+- Dashboard: active students, this-month revenue, pending dues, overdue, revenue trend (6 months), payment-mode pie, pending invoices table, subscription expiring/expired banner.
 - Users: director-only team CRUD with role assignment.
-- Settings: academy details + integrations health flags.
+- Settings: academy details + integrations health flags + live test panel (Send test WhatsApp + email).
+- **Integrations**: Meta WhatsApp Cloud API direct (LIVE) + Gmail SMTP (LIVE).
+- **Self-service Kiosk** (`/kiosk` — public, no auth): student types code → check-in / check-out → auto-marks attendance Present, recent check-ins panel.
+- **Parent Magic Link** (`/portal/<token>` — public, signed JWT, 180-day expiry): private portal showing attendance %, history, invoices, receipts with PDF download. One-tap WhatsApp share from student detail.
+- **Subscriptions**: per-student `subscription_start` / `subscription_end` / `subscription_status` (active / expiring_soon / expired). Auto-extends on payment based on plan (monthly +30, quarterly +90, annual +365). Dashboard banner shows expiring + expired counts.
 
 ## Backlog / Next
 - **P1**: Razorpay live payment integration (currently stubbed).

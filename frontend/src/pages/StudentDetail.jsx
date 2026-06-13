@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { ChevronLeft, Pencil, Trash2 } from "lucide-react";
+import { ChevronLeft, Pencil, Trash2, Link2, Share2, Copy, CalendarCheck, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
 const fmtINR = (n) => `₹${Number(n||0).toLocaleString("en-IN")}`;
@@ -31,12 +31,16 @@ export default function StudentDetail() {
   const [levels, setLevels] = useState([]);
   const [editOpen, setEditOpen] = useState(false);
   const [form, setForm] = useState(null);
+  const [subscription, setSubscription] = useState(null);
+  const [portalUrl, setPortalUrl] = useState("");
+  const [linking, setLinking] = useState(false);
 
   const reload = () => {
     api.get(`/students/${id}`).then((r) => setS(r.data));
     api.get(`/attendance/student/${id}`).then((r) => setAtt(r.data));
     api.get("/invoices", { params: { student_id: id } }).then((r) => setInv(r.data));
     api.get("/receipts", { params: { student_id: id } }).then((r) => setRec(r.data));
+    api.get(`/students/${id}/subscription`).then((r) => setSubscription(r.data));
   };
 
   useEffect(() => {
@@ -68,6 +72,42 @@ export default function StudentDetail() {
     } catch (ex) { toast.error(formatApiError(ex.response?.data?.detail)); }
   };
 
+  const generateMagicLink = async () => {
+    setLinking(true);
+    try {
+      const { data } = await api.post(`/students/${id}/magic-link`);
+      const url = `${window.location.origin}/portal/${data.token}`;
+      setPortalUrl(url);
+      toast.success("Magic link generated");
+    } catch (ex) { toast.error(formatApiError(ex.response?.data?.detail)); }
+    finally { setLinking(false); }
+  };
+
+  const copyLink = async () => {
+    try {
+      await navigator.clipboard.writeText(portalUrl);
+      toast.success("Link copied");
+    } catch { toast.error("Copy failed — select & copy manually"); }
+  };
+
+  const shareWhatsApp = () => {
+    if (!portalUrl || !s) return;
+    const num = (s.parent_whatsapp || "").replace(/[^\d]/g, "");
+    const msg = encodeURIComponent(
+      `Hello ${s.parent_name || ""},\n\nHere is your private parent portal for ${s.full_name} at Chess Klub Mysuru — attendance, invoices and receipts in one place:\n${portalUrl}\n\nThis link is private. Please don't share it.`
+    );
+    const url = num ? `https://wa.me/${num}?text=${msg}` : `https://wa.me/?text=${msg}`;
+    window.open(url, "_blank");
+  };
+
+  const extendSubscription = async () => {
+    try {
+      const { data } = await api.post(`/students/${id}/subscription/extend`, {});
+      setSubscription(data);
+      toast.success(`Subscription extended to ${data.end}`);
+    } catch (ex) { toast.error(formatApiError(ex.response?.data?.detail)); }
+  };
+
   if (!s) return <div className="text-sm text-[var(--ck-muted)]">Loading…</div>;
 
   return (
@@ -95,6 +135,84 @@ export default function StudentDetail() {
         <Stat label="Attendance" value={att ? `${att.percentage}%` : "—"} hint={`P ${att?.counts.P||0} · A ${att?.counts.A||0} · LT ${att?.counts.LT||0}`} />
         <Stat label="Total Billed" value={fmtINR(inv.reduce((a,b)=>a+b.amount,0))} hint={`${inv.length} invoices`} />
         <Stat label="Pending" value={fmtINR(inv.reduce((a,b)=>a+b.balance,0))} hint="balance outstanding" accent />
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
+        <div className="ck-card-elevated p-5" data-testid="subscription-card">
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <div className="text-xs uppercase tracking-wider font-semibold text-[var(--ck-muted)]">Subscription</div>
+              <div className="ck-display text-xl font-semibold capitalize">{subscription?.plan || s.payment_plan || "monthly"} plan</div>
+            </div>
+            <span className={`ck-pill ${
+              subscription?.status === "active" ? "ck-pill-green" :
+              subscription?.status === "expiring_soon" ? "ck-pill-orange" :
+              subscription?.status === "expired" ? "ck-pill-red" : "ck-pill-black"
+            }`}>{subscription?.status || "none"}</span>
+          </div>
+          <div className="grid grid-cols-2 gap-3 text-sm">
+            <div>
+              <div className="text-[var(--ck-muted)] text-xs">Start</div>
+              <div className="font-medium">{subscription?.start || "—"}</div>
+            </div>
+            <div>
+              <div className="text-[var(--ck-muted)] text-xs">Renew by</div>
+              <div className="font-medium">{subscription?.end || "—"}</div>
+            </div>
+          </div>
+          {subscription?.days_remaining != null && (
+            <div className={`mt-3 text-sm flex items-center gap-2 ${
+              subscription.days_remaining < 0 ? "text-red-600" :
+              subscription.days_remaining <= 7 ? "text-[var(--ck-orange)]" : "text-[var(--ck-muted)]"
+            }`}>
+              <CalendarCheck size={14} />
+              {subscription.days_remaining < 0
+                ? `Expired ${-subscription.days_remaining} day${subscription.days_remaining === -1 ? "" : "s"} ago`
+                : `${subscription.days_remaining} day${subscription.days_remaining === 1 ? "" : "s"} remaining`}
+            </div>
+          )}
+          <button onClick={extendSubscription} data-testid="sub-extend-btn"
+            className="ck-btn-ghost mt-4 w-full flex items-center justify-center gap-2 text-sm">
+            <RefreshCw size={14}/> Extend by {{"monthly":30,"quarterly":90,"annual":365}[(subscription?.plan || s.payment_plan || "monthly")]} days
+          </button>
+          <p className="text-[11px] text-[var(--ck-muted)] mt-2 leading-relaxed">
+            Subscriptions auto-extend when a payment is recorded against an invoice. Use this only for manual adjustments.
+          </p>
+        </div>
+
+        <div className="ck-card-elevated p-5" data-testid="magiclink-card">
+          <div className="flex items-center gap-2 mb-1">
+            <Link2 size={14} className="text-[var(--ck-orange)]" />
+            <div className="text-xs uppercase tracking-wider font-semibold text-[var(--ck-muted)]">Parent portal</div>
+          </div>
+          <div className="ck-display text-xl font-semibold mb-2">Magic link</div>
+          <p className="text-sm text-[var(--ck-muted)] mb-3 leading-relaxed">
+            Generate a private link the parent can open from WhatsApp to view {s.full_name?.split(" ")[0]}'s attendance, invoices and receipts. No login required, valid 180 days.
+          </p>
+          {!portalUrl ? (
+            <button onClick={generateMagicLink} disabled={linking} data-testid="magiclink-generate-btn"
+              className="ck-btn-primary w-full flex items-center justify-center gap-2 text-sm">
+              <Link2 size={14}/> {linking ? "Generating…" : "Generate magic link"}
+            </button>
+          ) : (
+            <>
+              <div className="ck-input rounded-lg px-3 py-2 text-xs font-mono break-all" data-testid="magiclink-url">
+                {portalUrl}
+              </div>
+              <div className="flex gap-2 mt-3">
+                <button onClick={copyLink} data-testid="magiclink-copy" className="ck-btn-ghost flex-1 flex items-center justify-center gap-2 text-sm">
+                  <Copy size={14}/> Copy
+                </button>
+                <button onClick={shareWhatsApp} data-testid="magiclink-whatsapp" className="ck-btn-primary flex-1 flex items-center justify-center gap-2 text-sm">
+                  <Share2 size={14}/> WhatsApp
+                </button>
+                <button onClick={generateMagicLink} title="Regenerate" className="ck-btn-ghost px-3">
+                  <RefreshCw size={14}/>
+                </button>
+              </div>
+            </>
+          )}
+        </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

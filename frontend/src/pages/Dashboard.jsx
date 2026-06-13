@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import PageHeader from "@/components/PageHeader";
-import { TrendingUp, Users, Wallet, AlertTriangle, Activity, UserPlus } from "lucide-react";
+import { TrendingUp, Users, Wallet, AlertTriangle, Activity, UserPlus, CalendarClock } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Tooltip, PieChart, Pie, Cell, Legend } from "recharts";
 import { Link } from "react-router-dom";
 
@@ -47,6 +47,22 @@ export default function Dashboard() {
         <StatCard testid="stat-pending" icon={Wallet} label="Pending Dues" value={fmtINR(s?.pending_amount)} hint="across all invoices" />
         <StatCard testid="stat-overdue" icon={AlertTriangle} label="Overdue" value={fmtINR(s?.overdue_amount)} hint={`${s?.overdue_count ?? 0} invoices`} />
       </div>
+
+      {(s?.expiring_soon || s?.expired_subs) ? (
+        <div className="ck-card-elevated p-4 mb-8 flex flex-col md:flex-row md:items-center gap-3 md:gap-6" data-testid="sub-banner"
+             style={{ borderLeft: "4px solid var(--ck-orange)" }}>
+          <CalendarClock size={20} className="text-[var(--ck-orange)]" />
+          <div className="flex-1">
+            <div className="text-xs uppercase tracking-wider font-semibold text-[var(--ck-muted)]">Subscriptions</div>
+            <div className="text-sm">
+              <span className="font-semibold">{s?.expired_subs || 0}</span> expired ·{" "}
+              <span className="font-semibold text-[var(--ck-orange)]">{s?.expiring_soon || 0}</span> expiring in next 7 days.
+              {" "}Renew or remind these parents before they drop off.
+            </div>
+          </div>
+          <Link to="/students" className="ck-btn-ghost text-xs">Review students →</Link>
+        </div>
+      ) : null}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-8">
         <div className="ck-card-elevated p-5 lg:col-span-2" data-testid="chart-revenue">

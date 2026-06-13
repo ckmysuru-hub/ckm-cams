@@ -12,6 +12,8 @@ import Levels from "@/pages/Levels";
 import Billing from "@/pages/Billing";
 import Receipts from "@/pages/Receipts";
 import Settings from "@/pages/Settings";
+import Kiosk from "@/pages/Kiosk";
+import ParentPortal from "@/pages/ParentPortal";
 
 function Protected({ children }) {
   const { user, ready } = useAuth();
@@ -26,6 +28,8 @@ function App() {
       <AuthProvider>
         <Routes>
           <Route path="/login" element={<Login />} />
+          <Route path="/kiosk" element={<Kiosk />} />
+          <Route path="/portal/:token" element={<ParentPortal />} />
           <Route element={<Protected><Layout /></Protected>}>
             <Route path="/" element={<Dashboard />} />
             <Route path="/students" element={<Students />} />

@@ -179,6 +179,7 @@ export default function Students() {
               <th>Parent</th>
               <th>WhatsApp</th>
               <th>Plan</th>
+              <th>Subscription</th>
               <th>Status</th>
               <th className="text-right pr-4">Actions</th>
             </tr>
@@ -196,6 +197,19 @@ export default function Students() {
                 <td className="text-[var(--ck-muted)]">{s.parent_whatsapp}</td>
                 <td className="capitalize">{s.payment_plan}</td>
                 <td>
+                  {s.subscription_end ? (
+                    <span className={`ck-pill ${
+                      s.subscription_status === "active" ? "ck-pill-green" :
+                      s.subscription_status === "expiring_soon" ? "ck-pill-orange" :
+                      s.subscription_status === "expired" ? "ck-pill-red" : "ck-pill-black"
+                    }`}>
+                      {s.subscription_end}
+                    </span>
+                  ) : (
+                    <span className="text-xs text-[var(--ck-muted)]">—</span>
+                  )}
+                </td>
+                <td>
                   <span className={`ck-pill ${s.status === "active" ? "ck-pill-green" : "ck-pill-black"}`}>{s.status}</span>
                 </td>
                 <td className="text-right pr-4">
@@ -211,7 +225,7 @@ export default function Students() {
               </tr>
             ))}
             {!items.length && (
-              <tr><td colSpan="7" className="text-center text-[var(--ck-muted)] py-10">No students yet. Enroll your first.</td></tr>
+              <tr><td colSpan="8" className="text-center text-[var(--ck-muted)] py-10">No students yet. Enroll your first.</td></tr>
             )}
           </tbody>
         </table>

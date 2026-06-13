@@ -647,6 +647,11 @@ async def record_payment(payload: PaymentIn, user: dict = Depends(require_role("
     await db.invoices.update_one({"_id": ObjectId(payload.invoice_id)},
                                  {"$set": {"paid": new_paid, "balance": new_balance, "status": status}})
     saved = serialize_doc({**receipt, "_id": r.inserted_id})
+    # Extend subscription based on the student's payment plan
+    student_doc = await db.students.find_one({"_id": ObjectId(inv["student_id"])})
+    plan = (student_doc or {}).get("payment_plan", "monthly") if student_doc else "monthly"
+    sub = await _extend_subscription(inv["student_id"], plan)
+    saved["subscription"] = sub
     if inv.get("parent_whatsapp"):
         send_whatsapp(inv["parent_whatsapp"],
                       f"Payment received: Rs.{payload.amount:.2f} for {inv['student_name']}. Receipt: {receipt_no}.")
@@ -878,6 +883,18 @@ async def dashboard_summary(user: dict = Depends(get_current_user)):
             elif st == "A": a_count += 1
     attendance_rate = round((p_count / (p_count + a_count)) * 100, 1) if (p_count + a_count) else 0
 
+    # subscription expiry buckets
+    today_iso = date.today().isoformat()
+    soon_iso = (date.today() + timedelta(days=7)).isoformat()
+    expiring_soon = await db.students.count_documents({
+        "status": "active",
+        "subscription_end": {"$gte": today_iso, "$lte": soon_iso},
+    })
+    expired_subs = await db.students.count_documents({
+        "status": "active",
+        "subscription_end": {"$lt": today_iso},
+    })
+
     return {
         "active_students": active_students,
         "total_students": total_students,
@@ -887,6 +904,8 @@ async def dashboard_summary(user: dict = Depends(get_current_user)):
         "overdue_count": len(overdue),
         "this_month_revenue": this_month_revenue,
         "attendance_rate": attendance_rate,
+        "expiring_soon": expiring_soon,
+        "expired_subs": expired_subs,
         "revenue_by_month": dict(sorted(by_month.items())[-6:]),
         "payment_by_mode": by_mode,
     }
@@ -965,6 +984,310 @@ async def test_notify(payload: TestNotifyIn, _: dict = Depends(require_role("dir
             f"<p>{payload.message}</p><p style='color:#777'>Sent from Chess Klub Mysuru CAMS.</p>",
         )
     return out
+
+PLAN_DAYS = {"monthly": 30, "quarterly": 90, "annual": 365}
+
+def _compute_sub_status(end_iso: Optional[str]) -> str:
+    if not end_iso:
+        return "none"
+    try:
+        end = datetime.fromisoformat(end_iso).date()
+    except Exception:
+        return "none"
+    today = date.today()
+    if end < today:
+        return "expired"
+    if (end - today).days <= 7:
+        return "expiring_soon"
+    return "active"
+
+async def _extend_subscription(student_id: str, plan: str, ref_date: Optional[date] = None) -> dict:
+    """Extend a student's subscription by the plan's day-count, anchored on the later of
+    today and the existing end-date. Persists subscription_start/end/status on the student doc."""
+    days = PLAN_DAYS.get(plan or "monthly", 30)
+    student = await db.students.find_one({"_id": ObjectId(student_id)})
+    if not student:
+        return {}
+    today = ref_date or date.today()
+    current_end_iso = student.get("subscription_end")
+    try:
+        current_end = datetime.fromisoformat(current_end_iso).date() if current_end_iso else None
+    except Exception:
+        current_end = None
+    anchor = max(today, current_end) if current_end and current_end >= today else today
+    new_end = anchor + timedelta(days=days)
+    sub_start = student.get("subscription_start") or today.isoformat()
+    new_end_iso = new_end.isoformat()
+    await db.students.update_one(
+        {"_id": ObjectId(student_id)},
+        {"$set": {
+            "subscription_start": sub_start,
+            "subscription_end": new_end_iso,
+            "subscription_status": _compute_sub_status(new_end_iso),
+            "subscription_plan": plan or "monthly",
+        }},
+    )
+    return {"subscription_start": sub_start, "subscription_end": new_end_iso}
+
+# ---------------------------- Kiosk: Self check-in / check-out ----------------------------
+class KioskAction(BaseModel):
+    code: str  # student_code like STU-2026-0001
+
+@api.post("/kiosk/checkin")
+async def kiosk_checkin(payload: KioskAction):
+    code = payload.code.strip().upper()
+    student = await db.students.find_one({"student_code": code})
+    if not student:
+        raise HTTPException(404, "Student code not recognised. Please check with the front desk.")
+    today_iso = date.today().isoformat()
+    existing = await db.checkins.find_one({
+        "student_id": str(student["_id"]),
+        "check_in_date": today_iso,
+    })
+    if existing and not existing.get("check_out"):
+        return {
+            "status": "already_in",
+            "student_name": student["full_name"],
+            "check_in": existing["check_in"],
+        }
+    if existing and existing.get("check_out"):
+        # already done for the day
+        return {
+            "status": "already_done",
+            "student_name": student["full_name"],
+            "check_in": existing["check_in"],
+            "check_out": existing["check_out"],
+        }
+    now = now_utc()
+    doc = {
+        "student_id": str(student["_id"]),
+        "student_code": code,
+        "student_name": student["full_name"],
+        "batch_id": student.get("batch_id"),
+        "check_in_date": today_iso,
+        "check_in": iso(now),
+        "check_out": None,
+        "duration_minutes": None,
+    }
+    res = await db.checkins.insert_one(doc)
+    # auto-mark attendance for today as Present
+    if student.get("batch_id"):
+        await db.attendance.update_one(
+            {"batch_id": student["batch_id"], "session_date": today_iso},
+            {"$set": {f"marks.{str(student['_id'])}": "P",
+                      "marked_via": "kiosk",
+                      "updated_at": iso(now)}},
+            upsert=True,
+        )
+    return {"status": "checked_in", "student_name": student["full_name"],
+            "check_in": doc["check_in"], "id": str(res.inserted_id)}
+
+@api.post("/kiosk/checkout")
+async def kiosk_checkout(payload: KioskAction):
+    code = payload.code.strip().upper()
+    student = await db.students.find_one({"student_code": code})
+    if not student:
+        raise HTTPException(404, "Student code not recognised.")
+    today_iso = date.today().isoformat()
+    existing = await db.checkins.find_one({
+        "student_id": str(student["_id"]),
+        "check_in_date": today_iso,
+    })
+    if not existing:
+        raise HTTPException(400, f"{student['full_name']} has not checked in today.")
+    if existing.get("check_out"):
+        return {"status": "already_out", "student_name": student["full_name"],
+                "check_in": existing["check_in"], "check_out": existing["check_out"]}
+    now = now_utc()
+    delta = (now - datetime.fromisoformat(existing["check_in"])).total_seconds() / 60.0
+    await db.checkins.update_one(
+        {"_id": existing["_id"]},
+        {"$set": {"check_out": iso(now), "duration_minutes": round(delta, 1)}},
+    )
+    return {"status": "checked_out", "student_name": student["full_name"],
+            "check_in": existing["check_in"], "check_out": iso(now),
+            "duration_minutes": round(delta, 1)}
+
+@api.get("/kiosk/recent")
+async def kiosk_recent(user: dict = Depends(get_current_user)):
+    today_iso = date.today().isoformat()
+    items = await db.checkins.find({"check_in_date": today_iso}).sort("check_in", -1).to_list(100)
+    return [serialize_doc(x) for x in items]
+
+# ---------------------------- Subscription endpoints ----------------------------
+class SubExtendIn(BaseModel):
+    plan: Optional[str] = None  # uses student's plan if not provided
+    days: Optional[int] = None  # explicit days override
+
+@api.get("/students/{sid}/subscription")
+async def get_subscription(sid: str, user: dict = Depends(get_current_user)):
+    s = await db.students.find_one({"_id": ObjectId(sid)})
+    if not s:
+        raise HTTPException(404, "Student not found")
+    end = s.get("subscription_end")
+    return {
+        "start": s.get("subscription_start"),
+        "end": end,
+        "plan": s.get("subscription_plan") or s.get("payment_plan", "monthly"),
+        "status": _compute_sub_status(end),
+        "days_remaining": (datetime.fromisoformat(end).date() - date.today()).days if end else None,
+    }
+
+@api.post("/students/{sid}/subscription/extend")
+async def extend_subscription_endpoint(sid: str, payload: SubExtendIn,
+                                       _: dict = Depends(require_role("ops_manager", "finance", "front_desk"))):
+    s = await db.students.find_one({"_id": ObjectId(sid)})
+    if not s:
+        raise HTTPException(404, "Student not found")
+    plan = payload.plan or s.get("payment_plan", "monthly")
+    if payload.days is not None:
+        # custom days extension
+        today = date.today()
+        current_end_iso = s.get("subscription_end")
+        try:
+            current_end = datetime.fromisoformat(current_end_iso).date() if current_end_iso else None
+        except Exception:
+            current_end = None
+        anchor = max(today, current_end) if current_end and current_end >= today else today
+        new_end = anchor + timedelta(days=int(payload.days))
+        sub_start = s.get("subscription_start") or today.isoformat()
+        new_end_iso = new_end.isoformat()
+        await db.students.update_one(
+            {"_id": ObjectId(sid)},
+            {"$set": {"subscription_start": sub_start,
+                      "subscription_end": new_end_iso,
+                      "subscription_status": _compute_sub_status(new_end_iso),
+                      "subscription_plan": plan}},
+        )
+        return await get_subscription(sid, _)
+    await _extend_subscription(sid, plan)
+    return await get_subscription(sid, _)
+
+# ---------------------------- Parent Magic Link ----------------------------
+class MagicLinkOut(BaseModel):
+    token: str
+    expires_at: str
+
+def _portal_token(student_id: str, days: int = 180) -> tuple[str, datetime]:
+    exp = now_utc() + timedelta(days=days)
+    payload = {"sub": student_id, "type": "portal", "exp": exp}
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGO), exp
+
+def _decode_portal_token(token: str) -> str:
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGO])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(401, "Link expired. Please request a new one.")
+    except jwt.InvalidTokenError:
+        raise HTTPException(401, "Invalid link.")
+    if payload.get("type") != "portal":
+        raise HTTPException(401, "Invalid link.")
+    return payload["sub"]
+
+@api.post("/students/{sid}/magic-link", response_model=MagicLinkOut)
+async def create_magic_link(sid: str, _: dict = Depends(require_role("ops_manager", "front_desk", "finance"))):
+    s = await db.students.find_one({"_id": ObjectId(sid)})
+    if not s:
+        raise HTTPException(404, "Student not found")
+    token, exp = _portal_token(sid)
+    await db.students.update_one(
+        {"_id": ObjectId(sid)},
+        {"$set": {"portal_token_issued_at": iso(now_utc())}},
+    )
+    return {"token": token, "expires_at": iso(exp)}
+
+@api.get("/portal/{token}/data")
+async def portal_data(token: str):
+    sid = _decode_portal_token(token)
+    s = await db.students.find_one({"_id": ObjectId(sid)})
+    if not s:
+        raise HTTPException(404, "Student not found")
+    sid_str = str(s["_id"])
+    # attendance
+    batch_id = s.get("batch_id")
+    sessions = await db.attendance.find({"batch_id": batch_id}, {"marks": 1, "session_date": 1}).sort("session_date", -1).limit(60).to_list(60) if batch_id else []
+    counts = {"P": 0, "A": 0, "L": 0, "LT": 0, "H": 0}
+    history = []
+    for sess in sessions:
+        st = (sess.get("marks") or {}).get(sid_str)
+        if st:
+            counts[st] = counts.get(st, 0) + 1
+            history.append({"date": sess["session_date"], "status": st})
+    total = sum(counts[k] for k in ["P", "A", "L", "LT"])
+    pct = round((counts["P"] + counts["LT"]) / total * 100, 1) if total else 0
+    # invoices + receipts
+    inv = await db.invoices.find({"student_id": sid_str}).sort("issued_at", -1).to_list(200)
+    rec = await db.receipts.find({"student_id": sid_str}).sort("created_at", -1).to_list(200)
+    # batch + level
+    batch = await db.batches.find_one({"_id": ObjectId(batch_id)}) if batch_id else None
+    level = await db.levels.find_one({"_id": ObjectId(s["level_id"])}) if s.get("level_id") else None
+    return {
+        "student": {
+            "id": sid_str,
+            "code": s.get("student_code"),
+            "name": s.get("full_name"),
+            "parent_name": s.get("parent_name"),
+            "batch": batch.get("name") if batch else None,
+            "level": level.get("name") if level else None,
+            "payment_plan": s.get("payment_plan"),
+            "subscription_start": s.get("subscription_start"),
+            "subscription_end": s.get("subscription_end"),
+            "subscription_status": _compute_sub_status(s.get("subscription_end")),
+        },
+        "academy": {
+            "name": os.environ.get("ACADEMY_NAME"),
+            "phone": os.environ.get("ACADEMY_PHONE"),
+            "email": os.environ.get("ACADEMY_EMAIL"),
+            "logo_url": os.environ.get("LOGO_URL"),
+        },
+        "attendance": {"counts": counts, "percentage": pct, "history": history[:30]},
+        "invoices": [serialize_doc(x) for x in inv],
+        "receipts": [serialize_doc(x) for x in rec],
+    }
+
+@api.get("/portal/{token}/invoice/{iid}/pdf")
+async def portal_invoice_pdf(token: str, iid: str):
+    sid = _decode_portal_token(token)
+    inv = await db.invoices.find_one({"_id": ObjectId(iid)})
+    if not inv or inv.get("student_id") != sid:
+        raise HTTPException(404, "Invoice not found")
+    rows = [[i["description"], f"{i['amount']:.2f}"] for i in inv["items"]]
+    totals = [
+        ["Subtotal", f"INR {inv['amount']:.2f}"],
+        ["Paid", f"INR {inv.get('paid', 0):.2f}"],
+        ["Balance Due", f"INR {inv['balance']:.2f}"],
+    ]
+    student_lines = [
+        f"<b>{inv.get('student_name')}</b> ({inv.get('student_code')})",
+        f"Period: {inv.get('period')}",
+        f"Due Date: {inv.get('due_date')}",
+    ]
+    footer = ["This is a computer-generated invoice.", "For queries, contact the academy office."]
+    pdf = _build_pdf("INVOICE", inv["invoice_no"], inv["issued_at"][:10], student_lines, rows, totals, footer)
+    return StreamingResponse(io.BytesIO(pdf), media_type="application/pdf",
+                             headers={"Content-Disposition": f'inline; filename="{inv["invoice_no"]}.pdf"'})
+
+@api.get("/portal/{token}/receipt/{rid}/pdf")
+async def portal_receipt_pdf(token: str, rid: str):
+    sid = _decode_portal_token(token)
+    r = await db.receipts.find_one({"_id": ObjectId(rid)})
+    if not r or r.get("student_id") != sid:
+        raise HTTPException(404, "Receipt not found")
+    rows = [[f"Payment for invoice {r['invoice_no']} ({r.get('period')})", f"{r['amount']:.2f}"]]
+    totals = [
+        ["Previous Balance", f"INR {r['previous_balance']:.2f}"],
+        ["Amount Paid", f"INR {r['amount']:.2f}"],
+        ["Remaining Balance", f"INR {r['remaining_balance']:.2f}"],
+    ]
+    student_lines = [
+        f"<b>{r.get('student_name')}</b> ({r.get('student_code')})",
+        f"Mode: {r['mode'].upper()}{' - Ref: ' + r['transaction_ref'] if r.get('transaction_ref') else ''}",
+        f"Received By: {r.get('received_by', '')}",
+    ]
+    footer = ["Thank you for your payment.", "This is a computer-generated receipt."]
+    pdf = _build_pdf("PAYMENT RECEIPT", r["receipt_no"], r["created_at"][:10], student_lines, rows, totals, footer)
+    return StreamingResponse(io.BytesIO(pdf), media_type="application/pdf",
+                             headers={"Content-Disposition": f'inline; filename="{r["receipt_no"]}.pdf"'})
 
 # ---------------------------- Mount ----------------------------
 app.include_router(api)

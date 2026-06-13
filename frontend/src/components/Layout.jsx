@@ -3,7 +3,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { Logo } from "@/components/Brand";
 import {
   LayoutDashboard, Users, Calendar, ClipboardCheck, GraduationCap,
-  ReceiptText, Settings, LogOut, FileText
+  ReceiptText, Settings, LogOut, FileText, ScanLine
 } from "lucide-react";
 import { Toaster } from "@/components/ui/sonner";
 
@@ -43,6 +43,16 @@ export default function Layout() {
               <span>{label}</span>
             </NavLink>
           ))}
+          <a
+            href="/kiosk"
+            target="_blank"
+            rel="noreferrer"
+            data-testid="nav-kiosk"
+            className="flex items-center gap-3 px-5 py-2.5 text-[var(--ck-orange)] hover:text-white border-l-[3px] border-transparent hover:bg-[rgba(244,91,42,0.08)] mt-2"
+          >
+            <ScanLine size={16} />
+            <span>Open Kiosk ↗</span>
+          </a>
         </nav>
         <div className="px-5 py-4 border-t border-white/5">
           <div className="text-xs text-white/50 mb-2">Signed in as</div>
