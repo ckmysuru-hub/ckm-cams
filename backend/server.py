@@ -351,6 +351,43 @@ def send_whatsapp_template(to_phone: str, template_name: str, language_code: str
         return {"sent": False, "mode": "error", "error": str(e)}
 
 
+def whatsapp_template_language() -> str:
+    return os.environ.get("WHATSAPP_TEMPLATE_LANGUAGE_CODE", "en")
+
+
+def money_text(amount) -> str:
+    return f"Rs.{float(amount or 0):.2f}"
+
+
+def send_fee_reminder_whatsapp(to_phone: str, invoice: dict) -> dict:
+    template_name = os.environ.get("WHATSAPP_FEE_REMINDER_TEMPLATE", "fee_reminder")
+    return send_whatsapp_template(
+        to_phone,
+        template_name,
+        whatsapp_template_language(),
+        [
+            invoice.get("invoice_no", ""),
+            invoice.get("student_name", ""),
+            money_text(invoice.get("balance", 0)),
+            invoice.get("due_date", ""),
+        ],
+    )
+
+
+def send_payment_receipt_whatsapp(to_phone: str, invoice: dict, receipt: dict) -> dict:
+    template_name = os.environ.get("WHATSAPP_PAYMENT_RECEIPT_TEMPLATE", "payment_receipt")
+    return send_whatsapp_template(
+        to_phone,
+        template_name,
+        whatsapp_template_language(),
+        [
+            money_text(receipt.get("amount", 0)),
+            invoice.get("student_name", ""),
+            receipt.get("receipt_no", ""),
+        ],
+    )
+
+
 def send_email(to_email: str, subject: str, html: str) -> dict:
     """Send an email via Gmail SMTP using an App Password.
     Falls back to log-only mode when credentials are missing."""
@@ -634,7 +671,7 @@ async def remind_invoice(iid: str, user: dict = Depends(require_role("finance", 
     wa_result = email_result = None
     msg = f"Reminder: Invoice {inv['invoice_no']} for {inv['student_name']} - Rs.{inv['balance']:.2f} due on {inv['due_date']}."
     if inv.get("parent_whatsapp"):
-        wa_result = send_whatsapp(inv["parent_whatsapp"], msg)
+        wa_result = send_fee_reminder_whatsapp(inv["parent_whatsapp"], inv)
     if inv.get("parent_email"):
         email_result = send_email(inv["parent_email"], f"Payment Reminder - {inv['invoice_no']}", f"<p>{msg}</p>")
     return {"whatsapp": wa_result, "email": email_result}
@@ -676,8 +713,7 @@ async def record_payment(payload: PaymentIn, user: dict = Depends(require_role("
     sub = await _extend_subscription(inv["student_id"], plan)
     saved["subscription"] = sub
     if inv.get("parent_whatsapp"):
-        send_whatsapp(inv["parent_whatsapp"],
-                      f"Payment received: Rs.{payload.amount:.2f} for {inv['student_name']}. Receipt: {receipt_no}.")
+        send_payment_receipt_whatsapp(inv["parent_whatsapp"], inv, saved)
     if inv.get("parent_email"):
         send_email(inv["parent_email"], f"Payment Receipt {receipt_no}",
                    f"<p>Thank you. We have received Rs.{payload.amount:.2f} towards invoice {inv['invoice_no']}.</p>")
