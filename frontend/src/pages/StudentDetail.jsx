@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useParams, Link, useNavigate } from "react-router-dom";
-import { api, formatApiError } from "@/lib/api";
+import { api, formatApiError, pdfUrl } from "@/lib/api";
 import PageHeader from "@/components/PageHeader";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -241,7 +241,7 @@ export default function StudentDetail() {
               </div>
               <div className="text-right">
                 <div className="font-medium">{fmtINR(r.amount)}</div>
-                <a className="text-xs text-[var(--ck-orange)] hover:underline" href={`${process.env.REACT_APP_BACKEND_URL}/api/receipts/${r.id}/pdf`} target="_blank" rel="noreferrer">PDF</a>
+                <a className="text-xs text-[var(--ck-orange)] hover:underline" href={pdfUrl(`/api/receipts/${r.id}/pdf`)} target="_blank" rel="noreferrer">PDF</a>
               </div>
             </div>
           )) : <div className="text-sm text-[var(--ck-muted)]">No receipts yet.</div>}

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, formatApiError, BACKEND_URL } from "@/lib/api";
+import { api, formatApiError, BACKEND_URL, pdfUrl } from "@/lib/api";
 import PageHeader from "@/components/PageHeader";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";

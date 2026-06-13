@@ -85,6 +85,9 @@ async def get_current_user(request: Request) -> dict:
         if auth_header.startswith("Bearer "):
             token = auth_header[7:]
     if not token:
+        # Allow ?token=... for direct file-download links (e.g. <a href> opens to PDF endpoints)
+        token = request.query_params.get("token")
+    if not token:
         raise HTTPException(401, "Not authenticated")
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGO])

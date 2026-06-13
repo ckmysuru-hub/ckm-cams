@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, BACKEND_URL } from "@/lib/api";
+import { api, BACKEND_URL, pdfUrl } from "@/lib/api";
 import PageHeader from "@/components/PageHeader";
 import { FileText } from "lucide-react";
 
@@ -32,7 +32,7 @@ export default function Receipts() {
                 <td className="uppercase text-xs">{r.mode}</td>
                 <td className="text-right font-medium">{fmt(r.amount)}</td>
                 <td className="text-right pr-4">
-                  <a href={`${BACKEND_URL}/api/receipts/${r.id}/pdf`} target="_blank" rel="noreferrer"
+                  <a href={pdfUrl(`/api/receipts/${r.id}/pdf`)} target="_blank" rel="noreferrer"
                      className="att-btn inline-flex items-center gap-1" data-testid={`rcp-pdf-${r.id}`}>
                     <FileText size={12}/> Open
                   </a>
