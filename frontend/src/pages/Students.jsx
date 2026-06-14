@@ -6,6 +6,16 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Plus, Search, Pencil, Trash2, Download, Upload, Filter } from "lucide-react";
 import { toast } from "sonner";
 import { downloadCsv, parseCsv } from "@/lib/csv";
@@ -14,7 +24,7 @@ import { SortableHead, applySort } from "@/components/SortableHead";
 const empty = {
   full_name: "", dob: "", gender: "male", parent_name: "", parent_whatsapp: "",
   parent_email: "", address: "", level_id: "", batch_id: "", payment_plan: "monthly",
-  concession_pct: 0, referred_by: "", status: "active",
+  subscription_start: "", subscription_end: "", concession_pct: 0, referred_by: "", status: "active",
 };
 
 const pickForm = (s) => ({
@@ -23,6 +33,7 @@ const pickForm = (s) => ({
   parent_email: s.parent_email || "", address: s.address || "",
   level_id: s.level_id || "", batch_id: s.batch_id || "",
   payment_plan: s.payment_plan || "monthly", concession_pct: s.concession_pct ?? 0,
+  subscription_start: s.subscription_start || "", subscription_end: s.subscription_end || "",
   referred_by: s.referred_by || "", status: s.status || "active",
 });
 
@@ -40,6 +51,8 @@ export default function Students() {
   const [filterStatus, setFilterStatus] = useState("all");
   const [filterSub, setFilterSub] = useState("all");
   const [importing, setImporting] = useState(false);
+  const [pendingLevel, setPendingLevel] = useState(null);
+  const [savingLevel, setSavingLevel] = useState(false);
 
   const load = () => api.get("/students", { params: q ? { q } : {} }).then((r) => setItems(r.data));
   useEffect(() => { load(); }, [q]);
@@ -80,13 +93,44 @@ export default function Students() {
 
   // Derived list: filter + sort
   const batchById = Object.fromEntries(batches.map((b) => [b.id, b.name]));
+  const levelById = Object.fromEntries(levels.map((l) => [l.id, l.name]));
+  const levelName = (levelId) => levelId ? (levelById[levelId] || "Unknown level") : "No level";
   const filtered = items.filter((s) => {
     if (filterBatch !== "all" && s.batch_id !== filterBatch) return false;
     if (filterStatus !== "all" && s.status !== filterStatus) return false;
     if (filterSub !== "all" && (s.subscription_status || "none") !== filterSub) return false;
     return true;
   });
-  const sorted = applySort(filtered, sort);
+  const sorted = applySort(filtered, sort, {
+    level_id: (s) => levelName(s.level_id),
+  });
+
+  const requestLevelChange = (student, nextValue) => {
+    const levelId = nextValue === "_none" ? "" : nextValue;
+    if ((student.level_id || "") === levelId) return;
+    setPendingLevel({ student, level_id: levelId });
+  };
+
+  const confirmLevelChange = async () => {
+    if (!pendingLevel) return;
+    setSavingLevel(true);
+    try {
+      const payload = {
+        ...pickForm(pendingLevel.student),
+        level_id: pendingLevel.level_id,
+        concession_pct: Number(pendingLevel.student.concession_pct || 0),
+      };
+      if (!payload.parent_email) payload.parent_email = null;
+      await api.put(`/students/${pendingLevel.student.id}`, payload);
+      toast.success(`Level updated to ${levelName(pendingLevel.level_id)}`);
+      setPendingLevel(null);
+      load();
+    } catch (ex) {
+      toast.error(formatApiError(ex.response?.data?.detail) || "Level update failed");
+    } finally {
+      setSavingLevel(false);
+    }
+  };
 
   const exportCsv = () => {
     const rows = sorted.map((s) => ({
@@ -99,8 +143,10 @@ export default function Students() {
       parent_email: s.parent_email || "",
       address: s.address || "",
       batch: batchById[s.batch_id] || "",
+      level: levelName(s.level_id),
       payment_plan: s.payment_plan || "",
       status: s.status || "",
+      subscription_start: s.subscription_start || "",
       subscription_end: s.subscription_end || "",
       enrollment_date: s.enrollment_date || "",
     }));
@@ -216,6 +262,12 @@ export default function Students() {
                 <Field label="Concession %">
                   <Input type="number" min="0" max="100" data-testid="sf-concession" value={form.concession_pct} onChange={(e)=>setForm({...form, concession_pct:e.target.value})} />
                 </Field>
+                <Field label="Validity Start">
+                  <Input type="date" data-testid="sf-validity-start" value={form.subscription_start || ""} onChange={(e)=>setForm({...form, subscription_start:e.target.value})} />
+                </Field>
+                <Field label="Validity End">
+                  <Input type="date" data-testid="sf-validity-end" value={form.subscription_end || ""} onChange={(e)=>setForm({...form, subscription_end:e.target.value})} />
+                </Field>
                 <Field label="Address" full>
                   <Input data-testid="sf-address" value={form.address} onChange={(e)=>setForm({...form, address:e.target.value})} />
                 </Field>
@@ -287,6 +339,7 @@ export default function Students() {
               <SortableHead label="Name" sortKey="full_name" sort={sort} onSort={setSort} />
               <th>Parent</th>
               <th>WhatsApp</th>
+              <SortableHead label="Level" sortKey="level_id" sort={sort} onSort={setSort} />
               <SortableHead label="Plan" sortKey="payment_plan" sort={sort} onSort={setSort} />
               <SortableHead label="Subscription" sortKey="subscription_end" sort={sort} onSort={setSort} />
               <th>Status</th>
@@ -304,6 +357,17 @@ export default function Students() {
                 </td>
                 <td className="text-[var(--ck-muted)]">{s.parent_name}</td>
                 <td className="text-[var(--ck-muted)]">{s.parent_whatsapp}</td>
+                <td>
+                  <Select value={s.level_id || "_none"} onValueChange={(v) => requestLevelChange(s, v)}>
+                    <SelectTrigger className="h-8 w-[150px]" data-testid={`student-level-${s.id}`}>
+                      <SelectValue placeholder="Level" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="_none">— None —</SelectItem>
+                      {levels.map((l)=>(<SelectItem key={l.id} value={l.id}>{l.name}</SelectItem>))}
+                    </SelectContent>
+                  </Select>
+                </td>
                 <td className="capitalize">{s.payment_plan}</td>
                 <td>
                   {s.subscription_end ? (
@@ -334,11 +398,34 @@ export default function Students() {
               </tr>
             ))}
             {!sorted.length && (
-              <tr><td colSpan="8" className="text-center text-[var(--ck-muted)] py-10">No students match the current filters.</td></tr>
+              <tr><td colSpan="9" className="text-center text-[var(--ck-muted)] py-10">No students match the current filters.</td></tr>
             )}
           </tbody>
         </table>
       </div>
+
+      <AlertDialog open={!!pendingLevel} onOpenChange={(o) => { if (!o && !savingLevel) setPendingLevel(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Update student level?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Change {pendingLevel?.student?.full_name}'s level from {levelName(pendingLevel?.student?.level_id)} to {levelName(pendingLevel?.level_id)}.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={savingLevel}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={savingLevel}
+              onClick={(e) => {
+                e.preventDefault();
+                confirmLevelChange();
+              }}
+            >
+              {savingLevel ? "Updating…" : "Update level"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   );
 }

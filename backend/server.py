@@ -33,17 +33,43 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.utils import formataddr
+from urllib.parse import quote
 
 # ---------------------------- Setup ----------------------------
+def configure_logging() -> logging.Logger:
+    app_level_name = os.environ.get("APP_LOG_LEVEL", "INFO").upper()
+    root_level_name = os.environ.get("ROOT_LOG_LEVEL", "WARNING").upper()
+    app_level = getattr(logging, app_level_name, logging.INFO)
+    root_level = getattr(logging, root_level_name, logging.WARNING)
+
+    logging.basicConfig(
+        level=root_level,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        force=True,
+    )
+
+    for noisy_logger in ("httpx", "httpcore", "urllib3", "motor", "pymongo"):
+        logging.getLogger(noisy_logger).setLevel(logging.WARNING)
+
+    logging.getLogger("uvicorn").setLevel(root_level)
+    logging.getLogger("uvicorn.error").setLevel(root_level)
+    access_logger = logging.getLogger("uvicorn.access")
+    access_logger.setLevel(logging.WARNING)
+    access_logger.disabled = os.environ.get("UVICORN_ACCESS_LOG", "false").lower() not in ("1", "true", "yes")
+
+    app_logger = logging.getLogger("cams")
+    app_logger.setLevel(app_level)
+    return app_logger
+
+
+logger = configure_logging()
+
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
 app = FastAPI(title="Chess Klub Mysuru CAMS")
 api = APIRouter(prefix="/api")
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger("cams")
 
 JWT_ALGO = "HS256"
 JWT_SECRET = os.environ["JWT_SECRET"]
@@ -77,6 +103,20 @@ def serialize_doc(doc: dict) -> dict:
     if "_id" in doc:
         doc["id"] = str(doc.pop("_id"))
     return doc
+
+def validate_subscription_dates(start_iso: Optional[str], end_iso: Optional[str]) -> None:
+    def parse_date(value: Optional[str], field: str):
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(value).date()
+        except Exception:
+            raise HTTPException(400, f"{field} must be a valid YYYY-MM-DD date")
+
+    start = parse_date(start_iso, "subscription_start")
+    end = parse_date(end_iso, "subscription_end")
+    if start and end and start > end:
+        raise HTTPException(400, "subscription_start cannot be after subscription_end")
 
 async def get_current_user(request: Request) -> dict:
     token = request.cookies.get("access_token")
@@ -135,6 +175,8 @@ class StudentIn(BaseModel):
     batch_id: Optional[str] = None
     enrollment_date: Optional[str] = None
     payment_plan: Optional[str] = "monthly"  # monthly | quarterly | annual
+    subscription_start: Optional[str] = None
+    subscription_end: Optional[str] = None
     concession_pct: Optional[float] = 0
     referred_by: Optional[str] = ""
     status: Optional[str] = "active"
@@ -281,7 +323,7 @@ def send_whatsapp(to_phone: str, message: str) -> dict:
     phone_id = os.environ.get("WHATSAPP_PHONE_NUMBER_ID")
     version = os.environ.get("WHATSAPP_GRAPH_VERSION", "v21.0")
     if not (token and phone_id):
-        logger.info(f"[WHATSAPP MOCK] to={to_phone} msg={message[:200]}")
+        logger.debug(f"[WHATSAPP MOCK] to={to_phone} chars={len(message or '')}")
         return {"sent": False, "mode": "log", "to": to_phone}
     # Normalize phone: strip +, spaces, dashes
     to_norm = (to_phone or "").replace("+", "").replace(" ", "").replace("-", "")
@@ -318,7 +360,7 @@ def send_whatsapp_template(to_phone: str, template_name: str, language_code: str
     phone_id = os.environ.get("WHATSAPP_PHONE_NUMBER_ID")
     version = os.environ.get("WHATSAPP_GRAPH_VERSION", "v21.0")
     if not (token and phone_id):
-        logger.info(f"[WHATSAPP MOCK TMPL] to={to_phone} tpl={template_name} params={body_params}")
+        logger.debug(f"[WHATSAPP MOCK TMPL] to={to_phone} tpl={template_name} params={len(body_params or [])}")
         return {"sent": False, "mode": "log", "to": to_phone}
     to_norm = (to_phone or "").replace("+", "").replace(" ", "").replace("-", "")
     url = f"https://graph.facebook.com/{version}/{phone_id}/messages"
@@ -359,8 +401,23 @@ def money_text(amount) -> str:
     return f"Rs.{float(amount or 0):.2f}"
 
 
+def public_backend_url() -> str:
+    return (
+        os.environ.get("PUBLIC_BACKEND_URL")
+        or os.environ.get("BACKEND_PUBLIC_URL")
+        or os.environ.get("BACKEND_URL")
+        or "http://localhost:8001"
+    ).rstrip("/")
+
+
+def portal_pdf_url(student_id: str, doc_type: Literal["invoice", "receipt"], doc_id: str) -> str:
+    token, _ = _portal_token(student_id)
+    return f"{public_backend_url()}/api/portal/{quote(token, safe='')}/{doc_type}/{doc_id}/pdf"
+
+
 def send_fee_reminder_whatsapp(to_phone: str, invoice: dict) -> dict:
     template_name = os.environ.get("WHATSAPP_FEE_REMINDER_TEMPLATE", "fee_reminder")
+    invoice_pdf_url = portal_pdf_url(str(invoice.get("student_id", "")), "invoice", str(invoice.get("_id", "")))
     return send_whatsapp_template(
         to_phone,
         template_name,
@@ -370,12 +427,14 @@ def send_fee_reminder_whatsapp(to_phone: str, invoice: dict) -> dict:
             invoice.get("student_name", ""),
             money_text(invoice.get("balance", 0)),
             invoice.get("due_date", ""),
+            invoice_pdf_url,
         ],
     )
 
 
 def send_payment_receipt_whatsapp(to_phone: str, invoice: dict, receipt: dict) -> dict:
     template_name = os.environ.get("WHATSAPP_PAYMENT_RECEIPT_TEMPLATE", "payment_receipt")
+    receipt_pdf_url = portal_pdf_url(str(receipt.get("student_id", "")), "receipt", str(receipt.get("id", receipt.get("_id", ""))))
     return send_whatsapp_template(
         to_phone,
         template_name,
@@ -384,6 +443,7 @@ def send_payment_receipt_whatsapp(to_phone: str, invoice: dict, receipt: dict) -
             money_text(receipt.get("amount", 0)),
             invoice.get("student_name", ""),
             receipt.get("receipt_no", ""),
+            receipt_pdf_url,
         ],
     )
 
@@ -396,7 +456,7 @@ def send_email(to_email: str, subject: str, html: str) -> dict:
     gmail_user = os.environ.get("GMAIL_USER")
     gmail_pass = os.environ.get("GMAIL_APP_PASSWORD")
     if not (gmail_user and gmail_pass):
-        logger.info(f"[EMAIL MOCK] to={to_email} subj={subject}")
+        logger.debug(f"[EMAIL MOCK] to={to_email} subject_set={bool(subject)}")
         return {"sent": False, "mode": "log", "to": to_email}
     try:
         msg = MIMEMultipart("alternative")
@@ -540,6 +600,10 @@ async def create_student(payload: StudentIn, user: dict = Depends(require_role("
     doc["created_by"] = user["id"]
     if not doc.get("enrollment_date"):
         doc["enrollment_date"] = date.today().isoformat()
+    validate_subscription_dates(doc.get("subscription_start"), doc.get("subscription_end"))
+    doc["subscription_status"] = _compute_sub_status(doc.get("subscription_end"))
+    if doc.get("subscription_end"):
+        doc["subscription_plan"] = doc.get("payment_plan") or "monthly"
     res = await db.students.insert_one(doc)
     saved = serialize_doc({**doc, "_id": res.inserted_id})
     # send welcome
@@ -560,7 +624,19 @@ async def get_student(sid: str, user: dict = Depends(get_current_user)):
 
 @api.put("/students/{sid}")
 async def update_student(sid: str, payload: StudentIn, _: dict = Depends(require_role("ops_manager", "front_desk"))):
-    await db.students.update_one({"_id": ObjectId(sid)}, {"$set": payload.model_dump()})
+    existing = await db.students.find_one({"_id": ObjectId(sid)})
+    if not existing:
+        raise HTTPException(404, "Student not found")
+    doc = payload.model_dump()
+    if doc.get("subscription_start") is None:
+        doc["subscription_start"] = existing.get("subscription_start")
+    if doc.get("subscription_end") is None:
+        doc["subscription_end"] = existing.get("subscription_end")
+    validate_subscription_dates(doc.get("subscription_start"), doc.get("subscription_end"))
+    doc["subscription_status"] = _compute_sub_status(doc.get("subscription_end"))
+    if doc.get("subscription_end"):
+        doc["subscription_plan"] = doc.get("payment_plan") or "monthly"
+    await db.students.update_one({"_id": ObjectId(sid)}, {"$set": doc})
     return serialize_doc(await db.students.find_one({"_id": ObjectId(sid)}))
 
 @api.delete("/students/{sid}")

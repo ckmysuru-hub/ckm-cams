@@ -17,6 +17,7 @@ const pickForm = (s) => ({
   parent_email: s.parent_email || "", address: s.address || "",
   level_id: s.level_id || "", batch_id: s.batch_id || "",
   payment_plan: s.payment_plan || "monthly", concession_pct: s.concession_pct ?? 0,
+  subscription_start: s.subscription_start || "", subscription_end: s.subscription_end || "",
   referred_by: s.referred_by || "", status: s.status || "active",
 });
 
@@ -297,6 +298,12 @@ export default function StudentDetail() {
                     <SelectItem value="annual">Annual</SelectItem>
                   </SelectContent>
                 </Select>
+              </DField>
+              <DField label="Validity Start">
+                <Input type="date" value={form.subscription_start || ""} onChange={(e)=>setForm({...form, subscription_start:e.target.value})} data-testid="sd-validity-start" />
+              </DField>
+              <DField label="Validity End">
+                <Input type="date" value={form.subscription_end || ""} onChange={(e)=>setForm({...form, subscription_end:e.target.value})} data-testid="sd-validity-end" />
               </DField>
               <DField label="Level">
                 <Select value={form.level_id || "_none"} onValueChange={(v)=>setForm({...form, level_id: v === "_none" ? "" : v})}>
