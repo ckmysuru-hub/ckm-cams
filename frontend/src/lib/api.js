@@ -1,16 +1,11 @@
 import axios from "axios";
 
-export const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
+export const BACKEND_URL = (process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, "");
 export const API_BASE = `${BACKEND_URL}/api`;
 
 export const api = axios.create({
   baseURL: API_BASE,
-});
-
-api.interceptors.request.use((config) => {
-  const t = localStorage.getItem("ck_token");
-  if (t) config.headers.Authorization = `Bearer ${t}`;
-  return config;
+  withCredentials: true,
 });
 
 export function formatApiError(detail) {
@@ -22,9 +17,7 @@ export function formatApiError(detail) {
 }
 
 export function pdfUrl(path) {
-  const t = localStorage.getItem("ck_token") || "";
-  const sep = path.includes("?") ? "&" : "?";
-  return `${BACKEND_URL}${path}${sep}token=${encodeURIComponent(t)}`;
+  return `${BACKEND_URL}${path}`;
 }
 
 export const LOGO_URL =

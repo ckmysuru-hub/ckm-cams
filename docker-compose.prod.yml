@@ -1,0 +1,79 @@
+name: chessklub-cams-prod
+
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    command: ["mongod", "--bind_ip_all"]
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ ping: 1 }).ok"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  app:
+    build:
+      context: .
+      args:
+        REACT_APP_BACKEND_URL: ""
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      APP_ENV: production
+      COOKIE_SECURE: "true"
+      MONGO_URL: mongodb://mongo:27017
+      DB_NAME: ${DB_NAME:?set DB_NAME}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:?set ADMIN_EMAIL}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD}
+      ADMIN_NAME: ${ADMIN_NAME:-Director}
+      PUBLIC_BACKEND_URL: https://${APP_DOMAIN:?set APP_DOMAIN}
+      CORS_ORIGINS: https://${APP_DOMAIN:?set APP_DOMAIN}
+      ACADEMY_NAME: ${ACADEMY_NAME:-Chess Klub Mysuru}
+      ACADEMY_ADDRESS: ${ACADEMY_ADDRESS:-}
+      ACADEMY_PHONE: ${ACADEMY_PHONE:-}
+      ACADEMY_EMAIL: ${ACADEMY_EMAIL:-}
+      ACADEMY_GSTIN: ${ACADEMY_GSTIN:-}
+      LOGO_URL: ${LOGO_URL:-}
+      GMAIL_USER: ${GMAIL_USER:-}
+      GMAIL_APP_PASSWORD: ${GMAIL_APP_PASSWORD:-}
+      WHATSAPP_TOKEN: ${WHATSAPP_TOKEN:-}
+      WHATSAPP_PHONE_NUMBER_ID: ${WHATSAPP_PHONE_NUMBER_ID:-}
+      WHATSAPP_VERIFY_TOKEN: ${WHATSAPP_VERIFY_TOKEN:-}
+      WHATSAPP_GRAPH_VERSION: ${WHATSAPP_GRAPH_VERSION:-v21.0}
+      APP_LOG_LEVEL: ${APP_LOG_LEVEL:-INFO}
+      ROOT_LOG_LEVEL: ${ROOT_LOG_LEVEL:-WARNING}
+    expose:
+      - "8001"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8001/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?set APP_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  mongo_data:
+  caddy_data:
+  caddy_config:

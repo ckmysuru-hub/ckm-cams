@@ -15,8 +15,10 @@ from typing import List, Optional, Literal
 import bcrypt
 import jwt
 from bson import ObjectId
+from bson.errors import InvalidId
 from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, EmailStr, ConfigDict
@@ -64,9 +66,48 @@ def configure_logging() -> logging.Logger:
 
 logger = configure_logging()
 
-mongo_url = os.environ['MONGO_URL']
+APP_ENV = os.environ.get("APP_ENV", os.environ.get("ENVIRONMENT", "development")).lower()
+
+
+def is_production() -> bool:
+    return APP_ENV in ("prod", "production")
+
+
+def parse_bool_env(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.lower() in ("1", "true", "yes", "on")
+
+
+def require_production_config() -> None:
+    if not is_production():
+        return
+    missing = [
+        name for name in (
+            "MONGO_URL",
+            "DB_NAME",
+            "JWT_SECRET",
+            "ADMIN_EMAIL",
+            "ADMIN_PASSWORD",
+            "PUBLIC_BACKEND_URL",
+            "CORS_ORIGINS",
+        )
+        if not os.environ.get(name)
+    ]
+    if missing:
+        raise RuntimeError(f"Missing required production env vars: {', '.join(missing)}")
+    if len(os.environ["JWT_SECRET"]) < 32:
+        raise RuntimeError("JWT_SECRET must be at least 32 characters in production")
+    if os.environ["ADMIN_PASSWORD"] == "Admin@123":
+        raise RuntimeError("ADMIN_PASSWORD must be changed before production startup")
+
+
+require_production_config()
+
+mongo_url = os.environ["MONGO_URL"]
 client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+db = client[os.environ["DB_NAME"]]
 
 app = FastAPI(title="Chess Klub Mysuru CAMS")
 api = APIRouter(prefix="/api")
@@ -74,6 +115,7 @@ api = APIRouter(prefix="/api")
 JWT_ALGO = "HS256"
 JWT_SECRET = os.environ["JWT_SECRET"]
 ROLES = ["director", "ops_manager", "coach", "front_desk", "finance"]
+COOKIE_SECURE = parse_bool_env("COOKIE_SECURE", is_production())
 
 # ---------------------------- Helpers ----------------------------
 def now_utc() -> datetime:
@@ -118,6 +160,12 @@ def validate_subscription_dates(start_iso: Optional[str], end_iso: Optional[str]
     if start and end and start > end:
         raise HTTPException(400, "subscription_start cannot be after subscription_end")
 
+def oid(value: str, field: str = "id") -> ObjectId:
+    try:
+        return ObjectId(value)
+    except (InvalidId, TypeError):
+        raise HTTPException(400, f"Invalid {field}")
+
 async def get_current_user(request: Request) -> dict:
     token = request.cookies.get("access_token")
     if not token:
@@ -125,15 +173,12 @@ async def get_current_user(request: Request) -> dict:
         if auth_header.startswith("Bearer "):
             token = auth_header[7:]
     if not token:
-        # Allow ?token=... for direct file-download links (e.g. <a href> opens to PDF endpoints)
-        token = request.query_params.get("token")
-    if not token:
         raise HTTPException(401, "Not authenticated")
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGO])
         if payload.get("type") != "access":
             raise HTTPException(401, "Invalid token type")
-        user = await db.users.find_one({"_id": ObjectId(payload["sub"])})
+        user = await db.users.find_one({"_id": oid(payload["sub"], "user id")})
         if not user:
             raise HTTPException(401, "User not found")
         user = serialize_doc(user)
@@ -263,9 +308,10 @@ async def startup():
             "created_at": iso(now_utc()),
         })
         logger.info(f"Seeded admin {admin_email}")
-    elif not verify_password(admin_pw, existing["password_hash"]):
+    elif parse_bool_env("ADMIN_RESET_PASSWORD_ON_STARTUP", False) and not verify_password(admin_pw, existing["password_hash"]):
         await db.users.update_one({"_id": existing["_id"]},
                                   {"$set": {"password_hash": hash_password(admin_pw)}})
+        logger.warning("Admin password reset from ADMIN_PASSWORD because ADMIN_RESET_PASSWORD_ON_STARTUP=true")
 
     # One-time migration: renumber students to CKM-00001 sorted by enrollment_date
     migrated = await db.counters.find_one({"key": "student-ckm-migrated"})
@@ -480,19 +526,27 @@ async def login(payload: LoginIn, response: Response):
     if not user or not verify_password(payload.password, user["password_hash"]):
         raise HTTPException(401, "Invalid email or password")
     token = create_access_token(str(user["_id"]), email, user["role"])
-    response.set_cookie("access_token", token, httponly=True, secure=False, samesite="lax",
+    response.set_cookie("access_token", token, httponly=True, secure=COOKIE_SECURE, samesite="lax",
                         max_age=12 * 3600, path="/")
-    return {"id": str(user["_id"]), "email": email, "name": user["name"], "role": user["role"],
-            "token": token}
+    return {"id": str(user["_id"]), "email": email, "name": user["name"], "role": user["role"]}
 
 @api.post("/auth/logout")
 async def logout(response: Response, _: dict = Depends(get_current_user)):
-    response.delete_cookie("access_token", path="/")
+    response.delete_cookie("access_token", path="/", secure=COOKIE_SECURE, samesite="lax")
     return {"ok": True}
 
 @api.get("/auth/me")
 async def me(user: dict = Depends(get_current_user)):
     return user
+
+@api.get("/health")
+async def health():
+    try:
+        await db.command("ping")
+    except Exception as e:
+        logger.warning(f"health check failed: {e}")
+        raise HTTPException(503, "Database unavailable")
+    return {"ok": True, "service": "ckm-cams", "env": APP_ENV}
 
 # ---------------------------- Users (Admin only) ----------------------------
 @api.get("/users")
@@ -513,7 +567,7 @@ async def create_user(payload: UserCreate, _: dict = Depends(require_role("direc
 
 @api.delete("/users/{uid}")
 async def delete_user(uid: str, _: dict = Depends(require_role("director"))):
-    await db.users.delete_one({"_id": ObjectId(uid)})
+    await db.users.delete_one({"_id": oid(uid)})
     return {"ok": True}
 
 # ---------------------------- Levels ----------------------------
@@ -531,13 +585,13 @@ async def create_level(payload: LevelIn, _: dict = Depends(require_role("ops_man
 
 @api.put("/levels/{lid}")
 async def update_level(lid: str, payload: LevelIn, _: dict = Depends(require_role("ops_manager", "finance"))):
-    await db.levels.update_one({"_id": ObjectId(lid)}, {"$set": payload.model_dump()})
-    doc = await db.levels.find_one({"_id": ObjectId(lid)})
+    await db.levels.update_one({"_id": oid(lid)}, {"$set": payload.model_dump()})
+    doc = await db.levels.find_one({"_id": oid(lid)})
     return serialize_doc(doc)
 
 @api.delete("/levels/{lid}")
 async def delete_level(lid: str, _: dict = Depends(require_role("ops_manager"))):
-    await db.levels.delete_one({"_id": ObjectId(lid)})
+    await db.levels.delete_one({"_id": oid(lid)})
     return {"ok": True}
 
 # ---------------------------- Batches ----------------------------
@@ -565,12 +619,12 @@ async def create_batch(payload: BatchIn, _: dict = Depends(require_role("ops_man
 
 @api.put("/batches/{bid}")
 async def update_batch(bid: str, payload: BatchIn, _: dict = Depends(require_role("ops_manager"))):
-    await db.batches.update_one({"_id": ObjectId(bid)}, {"$set": payload.model_dump()})
-    return serialize_doc(await db.batches.find_one({"_id": ObjectId(bid)}))
+    await db.batches.update_one({"_id": oid(bid)}, {"$set": payload.model_dump()})
+    return serialize_doc(await db.batches.find_one({"_id": oid(bid)}))
 
 @api.delete("/batches/{bid}")
 async def delete_batch(bid: str, _: dict = Depends(require_role("ops_manager"))):
-    await db.batches.delete_one({"_id": ObjectId(bid)})
+    await db.batches.delete_one({"_id": oid(bid)})
     return {"ok": True}
 
 @api.get("/batches/{bid}/students")
@@ -617,14 +671,14 @@ async def create_student(payload: StudentIn, user: dict = Depends(require_role("
 
 @api.get("/students/{sid}")
 async def get_student(sid: str, user: dict = Depends(get_current_user)):
-    s = await db.students.find_one({"_id": ObjectId(sid)})
+    s = await db.students.find_one({"_id": oid(sid)})
     if not s:
         raise HTTPException(404, "Student not found")
     return serialize_doc(s)
 
 @api.put("/students/{sid}")
 async def update_student(sid: str, payload: StudentIn, _: dict = Depends(require_role("ops_manager", "front_desk"))):
-    existing = await db.students.find_one({"_id": ObjectId(sid)})
+    existing = await db.students.find_one({"_id": oid(sid)})
     if not existing:
         raise HTTPException(404, "Student not found")
     doc = payload.model_dump()
@@ -636,12 +690,12 @@ async def update_student(sid: str, payload: StudentIn, _: dict = Depends(require
     doc["subscription_status"] = _compute_sub_status(doc.get("subscription_end"))
     if doc.get("subscription_end"):
         doc["subscription_plan"] = doc.get("payment_plan") or "monthly"
-    await db.students.update_one({"_id": ObjectId(sid)}, {"$set": doc})
-    return serialize_doc(await db.students.find_one({"_id": ObjectId(sid)}))
+    await db.students.update_one({"_id": oid(sid)}, {"$set": doc})
+    return serialize_doc(await db.students.find_one({"_id": oid(sid)}))
 
 @api.delete("/students/{sid}")
 async def delete_student(sid: str, _: dict = Depends(require_role("ops_manager"))):
-    await db.students.delete_one({"_id": ObjectId(sid)})
+    await db.students.delete_one({"_id": oid(sid)})
     return {"ok": True}
 
 # ---------------------------- Attendance ----------------------------
@@ -668,7 +722,7 @@ async def get_attendance(batch_id: str, session_date: str, user: dict = Depends(
 
 @api.get("/attendance/student/{sid}")
 async def student_attendance(sid: str, user: dict = Depends(get_current_user)):
-    student = await db.students.find_one({"_id": ObjectId(sid)})
+    student = await db.students.find_one({"_id": oid(sid)})
     if not student:
         raise HTTPException(404, "Student not found")
     batch_id = student.get("batch_id")
@@ -686,7 +740,7 @@ async def student_attendance(sid: str, user: dict = Depends(get_current_user)):
 
 # ---------------------------- Invoices & Payments ----------------------------
 async def _build_invoice_doc(payload: InvoiceIn, user: dict) -> dict:
-    student = await db.students.find_one({"_id": ObjectId(payload.student_id)})
+    student = await db.students.find_one({"_id": oid(payload.student_id)})
     if not student:
         raise HTTPException(404, "Student not found")
     total = round(sum(i.amount for i in payload.items), 2)
@@ -731,18 +785,18 @@ async def create_invoice(payload: InvoiceIn, user: dict = Depends(require_role("
 
 @api.get("/invoices/{iid}")
 async def get_invoice(iid: str, user: dict = Depends(get_current_user)):
-    inv = await db.invoices.find_one({"_id": ObjectId(iid)})
+    inv = await db.invoices.find_one({"_id": oid(iid)})
     if not inv: raise HTTPException(404, "Invoice not found")
     return serialize_doc(inv)
 
 @api.delete("/invoices/{iid}")
 async def delete_invoice(iid: str, _: dict = Depends(require_role("finance", "ops_manager"))):
-    await db.invoices.delete_one({"_id": ObjectId(iid)})
+    await db.invoices.delete_one({"_id": oid(iid)})
     return {"ok": True}
 
 @api.post("/invoices/{iid}/remind")
 async def remind_invoice(iid: str, user: dict = Depends(require_role("finance", "ops_manager", "front_desk"))):
-    inv = await db.invoices.find_one({"_id": ObjectId(iid)})
+    inv = await db.invoices.find_one({"_id": oid(iid)})
     if not inv: raise HTTPException(404, "Invoice not found")
     wa_result = email_result = None
     msg = f"Reminder: Invoice {inv['invoice_no']} for {inv['student_name']} - Rs.{inv['balance']:.2f} due on {inv['due_date']}."
@@ -754,7 +808,7 @@ async def remind_invoice(iid: str, user: dict = Depends(require_role("finance", 
 
 @api.post("/payments")
 async def record_payment(payload: PaymentIn, user: dict = Depends(require_role("finance", "ops_manager", "front_desk"))):
-    inv = await db.invoices.find_one({"_id": ObjectId(payload.invoice_id)})
+    inv = await db.invoices.find_one({"_id": oid(payload.invoice_id)})
     if not inv: raise HTTPException(404, "Invoice not found")
     if payload.amount <= 0:
         raise HTTPException(400, "Amount must be > 0")
@@ -780,11 +834,11 @@ async def record_payment(payload: PaymentIn, user: dict = Depends(require_role("
         "created_at": iso(now_utc()),
     }
     r = await db.receipts.insert_one(receipt)
-    await db.invoices.update_one({"_id": ObjectId(payload.invoice_id)},
+    await db.invoices.update_one({"_id": oid(payload.invoice_id)},
                                  {"$set": {"paid": new_paid, "balance": new_balance, "status": status}})
     saved = serialize_doc({**receipt, "_id": r.inserted_id})
     # Extend subscription based on the student's payment plan
-    student_doc = await db.students.find_one({"_id": ObjectId(inv["student_id"])})
+    student_doc = await db.students.find_one({"_id": oid(inv["student_id"])})
     plan = (student_doc or {}).get("payment_plan", "monthly") if student_doc else "monthly"
     sub = await _extend_subscription(inv["student_id"], plan)
     saved["subscription"] = sub
@@ -804,7 +858,7 @@ async def list_receipts(student_id: Optional[str] = None, user: dict = Depends(g
 
 @api.get("/receipts/{rid}")
 async def get_receipt(rid: str, user: dict = Depends(get_current_user)):
-    r = await db.receipts.find_one({"_id": ObjectId(rid)})
+    r = await db.receipts.find_one({"_id": oid(rid)})
     if not r: raise HTTPException(404, "Receipt not found")
     return serialize_doc(r)
 
@@ -930,7 +984,7 @@ def _build_pdf(title: str, doc_no: str, doc_date: str, student_lines: List[str],
 
 @api.get("/invoices/{iid}/pdf")
 async def invoice_pdf(iid: str, user: dict = Depends(get_current_user)):
-    inv = await db.invoices.find_one({"_id": ObjectId(iid)})
+    inv = await db.invoices.find_one({"_id": oid(iid)})
     if not inv: raise HTTPException(404, "Invoice not found")
     rows = [[i["description"], f"{i['amount']:.2f}"] for i in inv["items"]]
     totals = [
@@ -953,7 +1007,7 @@ async def invoice_pdf(iid: str, user: dict = Depends(get_current_user)):
 
 @api.get("/receipts/{rid}/pdf")
 async def receipt_pdf(rid: str, user: dict = Depends(get_current_user)):
-    r = await db.receipts.find_one({"_id": ObjectId(rid)})
+    r = await db.receipts.find_one({"_id": oid(rid)})
     if not r: raise HTTPException(404, "Receipt not found")
     rows = [
         [f"Payment for invoice {r['invoice_no']} ({r.get('period')})", f"{r['amount']:.2f}"],
@@ -1140,7 +1194,7 @@ async def _extend_subscription(student_id: str, plan: str, ref_date: Optional[da
     """Extend a student's subscription by the plan's day-count, anchored on the later of
     today and the existing end-date. Persists subscription_start/end/status on the student doc."""
     days = PLAN_DAYS.get(plan or "monthly", 30)
-    student = await db.students.find_one({"_id": ObjectId(student_id)})
+    student = await db.students.find_one({"_id": oid(student_id)})
     if not student:
         return {}
     today = ref_date or date.today()
@@ -1154,7 +1208,7 @@ async def _extend_subscription(student_id: str, plan: str, ref_date: Optional[da
     sub_start = student.get("subscription_start") or today.isoformat()
     new_end_iso = new_end.isoformat()
     await db.students.update_one(
-        {"_id": ObjectId(student_id)},
+        {"_id": oid(student_id)},
         {"$set": {
             "subscription_start": sub_start,
             "subscription_end": new_end_iso,
@@ -1256,7 +1310,7 @@ class SubExtendIn(BaseModel):
 
 @api.get("/students/{sid}/subscription")
 async def get_subscription(sid: str, user: dict = Depends(get_current_user)):
-    s = await db.students.find_one({"_id": ObjectId(sid)})
+    s = await db.students.find_one({"_id": oid(sid)})
     if not s:
         raise HTTPException(404, "Student not found")
     end = s.get("subscription_end")
@@ -1271,7 +1325,7 @@ async def get_subscription(sid: str, user: dict = Depends(get_current_user)):
 @api.post("/students/{sid}/subscription/extend")
 async def extend_subscription_endpoint(sid: str, payload: SubExtendIn,
                                        _: dict = Depends(require_role("ops_manager", "finance", "front_desk"))):
-    s = await db.students.find_one({"_id": ObjectId(sid)})
+    s = await db.students.find_one({"_id": oid(sid)})
     if not s:
         raise HTTPException(404, "Student not found")
     plan = payload.plan or s.get("payment_plan", "monthly")
@@ -1288,7 +1342,7 @@ async def extend_subscription_endpoint(sid: str, payload: SubExtendIn,
         sub_start = s.get("subscription_start") or today.isoformat()
         new_end_iso = new_end.isoformat()
         await db.students.update_one(
-            {"_id": ObjectId(sid)},
+            {"_id": oid(sid)},
             {"$set": {"subscription_start": sub_start,
                       "subscription_end": new_end_iso,
                       "subscription_status": _compute_sub_status(new_end_iso),
@@ -1321,12 +1375,12 @@ def _decode_portal_token(token: str) -> str:
 
 @api.post("/students/{sid}/magic-link", response_model=MagicLinkOut)
 async def create_magic_link(sid: str, _: dict = Depends(require_role("ops_manager", "front_desk", "finance"))):
-    s = await db.students.find_one({"_id": ObjectId(sid)})
+    s = await db.students.find_one({"_id": oid(sid)})
     if not s:
         raise HTTPException(404, "Student not found")
     token, exp = _portal_token(sid)
     await db.students.update_one(
-        {"_id": ObjectId(sid)},
+        {"_id": oid(sid)},
         {"$set": {"portal_token_issued_at": iso(now_utc())}},
     )
     return {"token": token, "expires_at": iso(exp)}
@@ -1334,7 +1388,7 @@ async def create_magic_link(sid: str, _: dict = Depends(require_role("ops_manage
 @api.get("/portal/{token}/data")
 async def portal_data(token: str):
     sid = _decode_portal_token(token)
-    s = await db.students.find_one({"_id": ObjectId(sid)})
+    s = await db.students.find_one({"_id": oid(sid)})
     if not s:
         raise HTTPException(404, "Student not found")
     sid_str = str(s["_id"])
@@ -1354,8 +1408,8 @@ async def portal_data(token: str):
     inv = await db.invoices.find({"student_id": sid_str}).sort("issued_at", -1).to_list(200)
     rec = await db.receipts.find({"student_id": sid_str}).sort("created_at", -1).to_list(200)
     # batch + level
-    batch = await db.batches.find_one({"_id": ObjectId(batch_id)}) if batch_id else None
-    level = await db.levels.find_one({"_id": ObjectId(s["level_id"])}) if s.get("level_id") else None
+    batch = await db.batches.find_one({"_id": oid(batch_id)}) if batch_id else None
+    level = await db.levels.find_one({"_id": oid(s["level_id"])}) if s.get("level_id") else None
     return {
         "student": {
             "id": sid_str,
@@ -1383,7 +1437,7 @@ async def portal_data(token: str):
 @api.get("/portal/{token}/invoice/{iid}/pdf")
 async def portal_invoice_pdf(token: str, iid: str):
     sid = _decode_portal_token(token)
-    inv = await db.invoices.find_one({"_id": ObjectId(iid)})
+    inv = await db.invoices.find_one({"_id": oid(iid)})
     if not inv or inv.get("student_id") != sid:
         raise HTTPException(404, "Invoice not found")
     rows = [[i["description"], f"{i['amount']:.2f}"] for i in inv["items"]]
@@ -1405,7 +1459,7 @@ async def portal_invoice_pdf(token: str, iid: str):
 @api.get("/portal/{token}/receipt/{rid}/pdf")
 async def portal_receipt_pdf(token: str, rid: str):
     sid = _decode_portal_token(token)
-    r = await db.receipts.find_one({"_id": ObjectId(rid)})
+    r = await db.receipts.find_one({"_id": oid(rid)})
     if not r or r.get("student_id") != sid:
         raise HTTPException(404, "Receipt not found")
     rows = [[f"Payment for invoice {r['invoice_no']} ({r.get('period')})", f"{r['amount']:.2f}"]]
@@ -1565,7 +1619,7 @@ class RegistrationConfirmIn(BaseModel):
 @api.post("/registrations/{rid}/confirm")
 async def confirm_registration(rid: str, payload: RegistrationConfirmIn,
                                user: dict = Depends(require_role("ops_manager", "front_desk"))):
-    reg = await db.registrations.find_one({"_id": ObjectId(rid)})
+    reg = await db.registrations.find_one({"_id": oid(rid)})
     if not reg:
         raise HTTPException(404, "Registration not found")
     if reg.get("status") == "confirmed":
@@ -1592,7 +1646,7 @@ async def confirm_registration(rid: str, payload: RegistrationConfirmIn,
     }
     res = await db.students.insert_one(student_doc)
     await db.registrations.update_one(
-        {"_id": ObjectId(rid)},
+        {"_id": oid(rid)},
         {"$set": {"status": "confirmed", "confirmed_at": iso(now_utc()),
                   "confirmed_by": user["id"], "student_id": str(res.inserted_id)}},
     )
@@ -1614,7 +1668,7 @@ async def confirm_registration(rid: str, payload: RegistrationConfirmIn,
 @api.delete("/registrations/{rid}")
 async def reject_registration(rid: str, _: dict = Depends(require_role("ops_manager", "front_desk"))):
     await db.registrations.update_one(
-        {"_id": ObjectId(rid)},
+        {"_id": oid(rid)},
         {"$set": {"status": "rejected", "rejected_at": iso(now_utc())}},
     )
     return {"ok": True}
@@ -1680,7 +1734,22 @@ app.include_router(api)
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=[o.strip() for o in os.environ.get('CORS_ORIGINS', 'http://localhost:3000').split(',') if o.strip()],
+    allow_origins=[o.strip() for o in os.environ.get("CORS_ORIGINS", "http://localhost:3000").split(",") if o.strip()],
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+FRONTEND_BUILD_DIR = ROOT_DIR / "frontend_build"
+if FRONTEND_BUILD_DIR.exists():
+    static_dir = FRONTEND_BUILD_DIR / "static"
+    if static_dir.exists():
+        app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        if full_path.startswith("api/"):
+            raise HTTPException(404, "Not found")
+        requested = FRONTEND_BUILD_DIR / full_path
+        if requested.is_file():
+            return FileResponse(requested)
+        return FileResponse(FRONTEND_BUILD_DIR / "index.html")

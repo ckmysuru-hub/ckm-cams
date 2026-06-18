@@ -9,13 +9,10 @@ export function AuthProvider({ children }) {
 
   useEffect(() => {
     (async () => {
-      const t = localStorage.getItem("ck_token");
-      if (!t) { setUser(false); setReady(true); return; }
       try {
         const { data } = await api.get("/auth/me");
         setUser(data);
       } catch {
-        localStorage.removeItem("ck_token");
         setUser(false);
       } finally {
         setReady(true);
@@ -25,13 +22,11 @@ export function AuthProvider({ children }) {
 
   const login = async (email, password) => {
     const { data } = await api.post("/auth/login", { email, password });
-    if (data.token) localStorage.setItem("ck_token", data.token);
     setUser(data);
     return data;
   };
   const logout = async () => {
     try { await api.post("/auth/logout"); } catch (_) { /* ignore */ }
-    localStorage.removeItem("ck_token");
     setUser(false);
   };
 
