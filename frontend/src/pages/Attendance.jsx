@@ -3,7 +3,7 @@ import { api, formatApiError } from "@/lib/api";
 import PageHeader from "@/components/PageHeader";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Save } from "lucide-react";
+import { Download, Save } from "lucide-react";
 import { toast } from "sonner";
 
 const OPTIONS = [
@@ -45,6 +45,26 @@ export default function Attendance() {
     finally { setSaving(false); }
   };
 
+  const exportCsv = async () => {
+    try {
+      const params = {};
+      if (batchId) params.batch_id = batchId;
+      if (date) {
+        params.start_date = date;
+        params.end_date = date;
+      }
+      const { data } = await api.get("/attendance/export", { params, responseType: "blob" });
+      const url = window.URL.createObjectURL(data);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `attendance-${date || "export"}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (ex) { toast.error(formatApiError(ex.response?.data?.detail)); }
+  };
+
   return (
     <>
       <PageHeader
@@ -69,6 +89,9 @@ export default function Attendance() {
         </div>
         <div className="flex gap-2 justify-end">
           <button className="ck-btn-ghost" onClick={()=>setAll("P")} disabled={!students.length} data-testid="mark-all-present">Mark all Present</button>
+          <button className="ck-btn-ghost flex items-center gap-2" onClick={exportCsv} data-testid="att-export">
+            <Download size={14}/> Export
+          </button>
           <button className="ck-btn-primary flex items-center gap-2" onClick={save} disabled={!batchId || saving} data-testid="att-save">
             <Save size={14}/> {saving ? "Saving…" : "Save"}
           </button>

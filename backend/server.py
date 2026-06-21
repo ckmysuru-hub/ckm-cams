@@ -6,6 +6,7 @@ load_dotenv(ROOT_DIR / '.env')
 
 import os
 import io
+import csv
 import uuid
 import logging
 import secrets
@@ -36,6 +37,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.utils import formataddr
 from urllib.parse import quote
+from email_templates import render_email_template
 
 # ---------------------------- Setup ----------------------------
 def configure_logging() -> logging.Logger:
@@ -224,7 +226,7 @@ class StudentIn(BaseModel):
     subscription_end: Optional[str] = None
     concession_pct: Optional[float] = 0
     referred_by: Optional[str] = ""
-    status: Optional[str] = "active"
+    status: Optional[str] = "inactive"
 
 class BatchIn(BaseModel):
     name: str
@@ -235,6 +237,13 @@ class BatchIn(BaseModel):
     venue: Optional[str] = None
     max_capacity: int = 20
     status: str = "active"
+    whatsapp_group_link: Optional[str] = ""
+    whatsapp_group_recipient: Optional[str] = ""
+
+class BatchWhatsappIn(BaseModel):
+    template: str = "batch_announcement"
+    title: Optional[str] = ""
+    event_date: Optional[str] = None
 
 class LevelIn(BaseModel):
     name: str
@@ -293,6 +302,7 @@ async def startup():
     await db.invoices.create_index("invoice_no", unique=True, sparse=True)
     await db.receipts.create_index("receipt_no", unique=True, sparse=True)
     await db.attendance.create_index([("batch_id", 1), ("session_date", 1)], unique=True)
+    await db.checkins.create_index([("student_id", 1), ("check_in_date", 1)], unique=True)
     await db.counters.create_index("key", unique=True)
     # seed admin
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@chessklub.in")
@@ -360,45 +370,6 @@ async def gen_receipt_no() -> str:
     return f"RCP-{today.year}-{today.month:02d}-{n:04d}"
 
 # ---------------------------- Notifications ----------------------------
-def send_whatsapp(to_phone: str, message: str) -> dict:
-    """Send a WhatsApp message via Meta Cloud API (free-form text).
-    NOTE: Free-form messages only work within the 24-hour customer-care window.
-    For first-contact messages, an approved utility template is required.
-    Falls back to log-only mode when credentials are missing."""
-    token = os.environ.get("WHATSAPP_TOKEN")
-    phone_id = os.environ.get("WHATSAPP_PHONE_NUMBER_ID")
-    version = os.environ.get("WHATSAPP_GRAPH_VERSION", "v21.0")
-    if not (token and phone_id):
-        logger.debug(f"[WHATSAPP MOCK] to={to_phone} chars={len(message or '')}")
-        return {"sent": False, "mode": "log", "to": to_phone}
-    # Normalize phone: strip +, spaces, dashes
-    to_norm = (to_phone or "").replace("+", "").replace(" ", "").replace("-", "")
-    url = f"https://graph.facebook.com/{version}/{phone_id}/messages"
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to_norm,
-        "type": "text",
-        "text": {"body": message[:4096]},
-    }
-    try:
-        r = requests.post(url, headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        }, json=payload, timeout=15)
-        ok = r.ok
-        data = {}
-        try:
-            data = r.json()
-        except Exception:
-            data = {"raw": r.text}
-        if not ok:
-            logger.warning(f"WhatsApp send failed [{r.status_code}]: {data}")
-        return {"sent": ok, "mode": "meta_cloud", "status": r.status_code, "response": data}
-    except Exception as e:
-        logger.warning(f"WhatsApp send exception: {e}")
-        return {"sent": False, "mode": "error", "error": str(e)}
-
-
 def send_whatsapp_template(to_phone: str, template_name: str, language_code: str,
                            body_params: List[str]) -> dict:
     """Send an approved WhatsApp template message (works outside the 24h window)."""
@@ -443,6 +414,23 @@ def whatsapp_template_language() -> str:
     return os.environ.get("WHATSAPP_TEMPLATE_LANGUAGE_CODE", "en")
 
 
+WHATSAPP_TEMPLATES = {
+    "student_welcome": os.environ.get("WHATSAPP_STUDENT_WELCOME_TEMPLATE", "student_welcome"),
+    "registration_received": os.environ.get("WHATSAPP_REGISTRATION_RECEIVED_TEMPLATE", "registration_received"),
+    "registration_confirmed": os.environ.get("WHATSAPP_REGISTRATION_CONFIRMED_TEMPLATE", "registration_confirmed"),
+    "invoice_created": os.environ.get("WHATSAPP_INVOICE_CREATED_TEMPLATE", "invoice_created"),
+    "notify_test": os.environ.get("WHATSAPP_NOTIFY_TEST_TEMPLATE", "notify_test"),
+    "batch_announcement": os.environ.get("WHATSAPP_BATCH_ANNOUNCEMENT_TEMPLATE", "batch_announcement"),
+}
+
+
+def send_named_whatsapp_template(to_phone: str, template_key: str, body_params: List[str]) -> dict:
+    template_name = WHATSAPP_TEMPLATES.get(template_key)
+    if not template_name:
+        raise HTTPException(400, f"Unknown WhatsApp template: {template_key}")
+    return send_whatsapp_template(to_phone, template_name, whatsapp_template_language(), body_params)
+
+
 def money_text(amount) -> str:
     return f"Rs.{float(amount or 0):.2f}"
 
@@ -470,8 +458,8 @@ def send_fee_reminder_whatsapp(to_phone: str, invoice: dict) -> dict:
         whatsapp_template_language(),
         [
             invoice.get("invoice_no", ""),
-            invoice.get("student_name", ""),
             money_text(invoice.get("balance", 0)),
+            invoice.get("student_name", ""),
             invoice.get("due_date", ""),
             invoice_pdf_url,
         ],
@@ -491,6 +479,42 @@ def send_payment_receipt_whatsapp(to_phone: str, invoice: dict, receipt: dict) -
             receipt.get("receipt_no", ""),
             receipt_pdf_url,
         ],
+    )
+
+
+def send_template_email(to_email: str, template_key: str, context: dict) -> dict:
+    context = {"academy_name": os.environ.get("ACADEMY_NAME", "Chess Klub Mysuru"), **context}
+    subject, html = render_email_template(template_key, context)
+    return send_email(to_email, subject, html)
+
+
+async def existing_attendance_for_student(student_id: str, session_date: str, batch_id: Optional[str] = None) -> Optional[dict]:
+    query = {f"marks.{student_id}": {"$exists": True}, "session_date": session_date}
+    if batch_id:
+        query["batch_id"] = {"$ne": batch_id}
+    return await db.attendance.find_one(query)
+
+
+async def mark_student_present_from_kiosk(student: dict, session_date: str, checkin_time: datetime) -> None:
+    batch_id = student.get("batch_id")
+    if not batch_id:
+        return
+    sid = str(student["_id"])
+    duplicate = await existing_attendance_for_student(sid, session_date, batch_id=batch_id)
+    if duplicate:
+        raise HTTPException(400, "Attendance already exists for this student today.")
+    current = await db.attendance.find_one({"batch_id": batch_id, "session_date": session_date})
+    if current and sid in current.get("marks", {}):
+        return
+    await db.attendance.update_one(
+        {"batch_id": batch_id, "session_date": session_date},
+        {"$set": {
+            f"marks.{sid}": "P",
+            f"kiosk_checkins.{sid}": iso(checkin_time),
+            "marked_via": "kiosk",
+            "updated_at": iso(checkin_time),
+        }},
+        upsert=True,
     )
 
 
@@ -622,6 +646,42 @@ async def update_batch(bid: str, payload: BatchIn, _: dict = Depends(require_rol
     await db.batches.update_one({"_id": oid(bid)}, {"$set": payload.model_dump()})
     return serialize_doc(await db.batches.find_one({"_id": oid(bid)}))
 
+@api.post("/batches/{bid}/whatsapp")
+async def send_batch_whatsapp(bid: str, payload: BatchWhatsappIn,
+                              user: dict = Depends(require_role("ops_manager", "front_desk", "coach"))):
+    batch = await db.batches.find_one({"_id": oid(bid)})
+    if not batch:
+        raise HTTPException(404, "Batch not found")
+    template_key = payload.template or "batch_announcement"
+    if template_key != "batch_announcement":
+        raise HTTPException(400, "Unsupported batch WhatsApp template")
+    params = [
+        batch.get("name", ""),
+        payload.title or "Class update",
+        payload.event_date or date.today().isoformat(),
+    ]
+    recipient = (batch.get("whatsapp_group_recipient") or "").strip()
+    result = None
+    if recipient:
+        result = send_named_whatsapp_template(recipient, template_key, params)
+    await db.whatsapp_batch_messages.insert_one({
+        "batch_id": bid,
+        "template": template_key,
+        "params": params,
+        "sent_to": recipient or None,
+        "group_link": batch.get("whatsapp_group_link") or "",
+        "result": result,
+        "created_at": iso(now_utc()),
+        "created_by": user["id"],
+    })
+    return {
+        "whatsapp": result,
+        "template": template_key,
+        "params": params,
+        "group_link": batch.get("whatsapp_group_link") or "",
+        "mode": "template" if recipient else "group_link",
+    }
+
 @api.delete("/batches/{bid}")
 async def delete_batch(bid: str, _: dict = Depends(require_role("ops_manager"))):
     await db.batches.delete_one({"_id": oid(bid)})
@@ -662,11 +722,11 @@ async def create_student(payload: StudentIn, user: dict = Depends(require_role("
     saved = serialize_doc({**doc, "_id": res.inserted_id})
     # send welcome
     if saved.get("parent_whatsapp"):
-        send_whatsapp(saved["parent_whatsapp"],
-                      f"Welcome to {os.environ.get('ACADEMY_NAME')}! {saved['full_name']} has been enrolled. Student ID: {saved['student_code']}")
+        send_named_whatsapp_template(saved["parent_whatsapp"], "student_welcome",
+                                     [saved["full_name"], saved["student_code"], os.environ.get("ACADEMY_NAME", "")])
     if saved.get("parent_email"):
-        send_email(saved["parent_email"], f"Welcome to {os.environ.get('ACADEMY_NAME')}",
-                   f"<p>Dear Parent,</p><p>Your child <b>{saved['full_name']}</b> has been enrolled. Student ID: <b>{saved['student_code']}</b>.</p>")
+        send_template_email(saved["parent_email"], "student_welcome",
+                            {"student_name": saved["full_name"], "student_code": saved["student_code"]})
     return saved
 
 @api.get("/students/{sid}")
@@ -701,6 +761,15 @@ async def delete_student(sid: str, _: dict = Depends(require_role("ops_manager")
 # ---------------------------- Attendance ----------------------------
 @api.post("/attendance")
 async def save_attendance(payload: AttendanceSessionIn, user: dict = Depends(require_role("coach", "ops_manager", "front_desk"))):
+    duplicate_students = []
+    for sid, mark in payload.marks.items():
+        if mark not in ("P", "A", "L", "LT", "H"):
+            raise HTTPException(400, f"Invalid attendance mark for student {sid}")
+        duplicate = await existing_attendance_for_student(sid, payload.session_date, batch_id=payload.batch_id)
+        if duplicate:
+            duplicate_students.append(sid)
+    if duplicate_students:
+        raise HTTPException(400, "A student attendance cannot be marked more than once for a day.")
     doc = {
         "batch_id": payload.batch_id,
         "session_date": payload.session_date,
@@ -719,6 +788,43 @@ async def save_attendance(payload: AttendanceSessionIn, user: dict = Depends(req
 async def get_attendance(batch_id: str, session_date: str, user: dict = Depends(get_current_user)):
     doc = await db.attendance.find_one({"batch_id": batch_id, "session_date": session_date})
     return serialize_doc(doc) if doc else {"batch_id": batch_id, "session_date": session_date, "marks": {}}
+
+@api.get("/attendance/export")
+async def export_attendance(batch_id: Optional[str] = None, start_date: Optional[str] = None,
+                            end_date: Optional[str] = None, user: dict = Depends(get_current_user)):
+    flt = {}
+    if batch_id:
+        flt["batch_id"] = batch_id
+    if start_date or end_date:
+        flt["session_date"] = {}
+        if start_date:
+            flt["session_date"]["$gte"] = start_date
+        if end_date:
+            flt["session_date"]["$lte"] = end_date
+    sessions = await db.attendance.find(flt).sort([("session_date", 1), ("batch_id", 1)]).to_list(5000)
+    batch_ids = list({s.get("batch_id") for s in sessions if s.get("batch_id")})
+    student_ids = list({sid for s in sessions for sid in s.get("marks", {}).keys()})
+    batches = await db.batches.find({"_id": {"$in": [oid(b) for b in batch_ids if b]}}).to_list(1000) if batch_ids else []
+    students = await db.students.find({"_id": {"$in": [oid(s) for s in student_ids if s]}}).to_list(5000) if student_ids else []
+    batch_map = {str(b["_id"]): b.get("name", "") for b in batches}
+    student_map = {str(s["_id"]): s for s in students}
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(["session_date", "batch", "student_code", "student_name", "status", "marked_via"])
+    for session in sessions:
+        for sid, status in sorted(session.get("marks", {}).items(), key=lambda kv: (student_map.get(kv[0], {}).get("full_name", ""), kv[0])):
+            student = student_map.get(sid, {})
+            writer.writerow([
+                session.get("session_date", ""),
+                batch_map.get(session.get("batch_id"), session.get("batch_id", "")),
+                student.get("student_code", ""),
+                student.get("full_name", sid),
+                status,
+                session.get("marked_via", "manual"),
+            ])
+    filename = f"attendance-{date.today().isoformat()}.csv"
+    return StreamingResponse(iter([out.getvalue()]), media_type="text/csv",
+                             headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 @api.get("/attendance/student/{sid}")
 async def student_attendance(sid: str, user: dict = Depends(get_current_user)):
@@ -779,8 +885,8 @@ async def create_invoice(payload: InvoiceIn, user: dict = Depends(require_role("
     res = await db.invoices.insert_one(inv)
     saved = serialize_doc({**inv, "_id": res.inserted_id})
     if saved.get("parent_whatsapp"):
-        send_whatsapp(saved["parent_whatsapp"],
-                      f"Invoice {saved['invoice_no']} for {saved['student_name']} - Amount: Rs.{saved['amount']:.2f}. Due: {saved['due_date']}.")
+        send_named_whatsapp_template(saved["parent_whatsapp"], "invoice_created",
+                                     [saved["invoice_no"], saved["student_name"], money_text(saved["amount"]), saved["due_date"]])
     return saved
 
 @api.get("/invoices/{iid}")
@@ -799,11 +905,15 @@ async def remind_invoice(iid: str, user: dict = Depends(require_role("finance", 
     inv = await db.invoices.find_one({"_id": oid(iid)})
     if not inv: raise HTTPException(404, "Invoice not found")
     wa_result = email_result = None
-    msg = f"Reminder: Invoice {inv['invoice_no']} for {inv['student_name']} - Rs.{inv['balance']:.2f} due on {inv['due_date']}."
     if inv.get("parent_whatsapp"):
         wa_result = send_fee_reminder_whatsapp(inv["parent_whatsapp"], inv)
     if inv.get("parent_email"):
-        email_result = send_email(inv["parent_email"], f"Payment Reminder - {inv['invoice_no']}", f"<p>{msg}</p>")
+        email_result = send_template_email(inv["parent_email"], "payment_reminder", {
+            "invoice_no": inv["invoice_no"],
+            "student_name": inv.get("student_name", ""),
+            "balance": money_text(inv.get("balance", 0)),
+            "due_date": inv.get("due_date", ""),
+        })
     return {"whatsapp": wa_result, "email": email_result}
 
 @api.post("/payments")
@@ -845,8 +955,11 @@ async def record_payment(payload: PaymentIn, user: dict = Depends(require_role("
     if inv.get("parent_whatsapp"):
         send_payment_receipt_whatsapp(inv["parent_whatsapp"], inv, saved)
     if inv.get("parent_email"):
-        send_email(inv["parent_email"], f"Payment Receipt {receipt_no}",
-                   f"<p>Thank you. We have received Rs.{payload.amount:.2f} towards invoice {inv['invoice_no']}.</p>")
+        send_template_email(inv["parent_email"], "payment_receipt", {
+            "receipt_no": receipt_no,
+            "amount": money_text(payload.amount),
+            "invoice_no": inv["invoice_no"],
+        })
     return saved
 
 @api.get("/receipts")
@@ -1165,13 +1278,9 @@ async def test_notify(payload: TestNotifyIn, _: dict = Depends(require_role("dir
     """Send a test WhatsApp/email to verify integrations are live."""
     out = {}
     if payload.to_phone:
-        out["whatsapp"] = send_whatsapp(payload.to_phone, payload.message or "Test")
+        out["whatsapp"] = send_named_whatsapp_template(payload.to_phone, "notify_test", [payload.message or "Test"])
     if payload.to_email:
-        out["email"] = send_email(
-            payload.to_email,
-            f"Test email from {os.environ.get('ACADEMY_NAME', 'CAMS')}",
-            f"<p>{payload.message}</p><p style='color:#777'>Sent from Chess Klub Mysuru CAMS.</p>",
-        )
+        out["email"] = send_template_email(payload.to_email, "notify_test", {"message": payload.message or "Test"})
     return out
 
 PLAN_DAYS = {"monthly": 30, "quarterly": 90, "annual": 365}
@@ -1258,16 +1367,8 @@ async def kiosk_checkin(payload: KioskAction):
         "check_out": None,
         "duration_minutes": None,
     }
+    await mark_student_present_from_kiosk(student, today_iso, now)
     res = await db.checkins.insert_one(doc)
-    # auto-mark attendance for today as Present
-    if student.get("batch_id"):
-        await db.attendance.update_one(
-            {"batch_id": student["batch_id"], "session_date": today_iso},
-            {"$set": {f"marks.{str(student['_id'])}": "P",
-                      "marked_via": "kiosk",
-                      "updated_at": iso(now)}},
-            upsert=True,
-        )
     return {"status": "checked_in", "student_name": student["full_name"],
             "check_in": doc["check_in"], "id": str(res.inserted_id)}
 
@@ -1594,11 +1695,11 @@ async def create_registration(payload: RegistrationIn):
     saved = serialize_doc({**doc, "_id": res.inserted_id})
     # Acknowledge receipt to parent
     if saved.get("parent_whatsapp"):
-        send_whatsapp(saved["parent_whatsapp"],
-                      f"Thank you {saved['parent_name']}! We've received your registration for {saved['full_name']} at Chess Klub Mysuru. Our team will confirm shortly.")
+        send_named_whatsapp_template(saved["parent_whatsapp"], "registration_received",
+                                     [saved["parent_name"], saved["full_name"], os.environ.get("ACADEMY_NAME", "")])
     if saved.get("parent_email"):
-        send_email(saved["parent_email"], "Registration received — Chess Klub Mysuru",
-                   f"<p>Dear {saved['parent_name']},</p><p>We've received your registration for <b>{saved['full_name']}</b>. Our team will review and confirm shortly.</p>")
+        send_template_email(saved["parent_email"], "registration_received",
+                            {"parent_name": saved["parent_name"], "student_name": saved["full_name"]})
     return {"id": saved["id"], "status": "received"}
 
 @api.get("/registrations")
@@ -1652,17 +1753,14 @@ async def confirm_registration(rid: str, payload: RegistrationConfirmIn,
     )
     # Welcome notifications
     if student_doc.get("parent_whatsapp"):
-        send_whatsapp(student_doc["parent_whatsapp"],
-                      f"Welcome to {os.environ.get('ACADEMY_NAME')}! {student_doc['full_name']} has been confirmed. Student ID: {student_doc['student_code']}. We'll see you at the board!")
+        send_named_whatsapp_template(student_doc["parent_whatsapp"], "registration_confirmed",
+                                     [student_doc["parent_name"], student_doc["full_name"], student_doc["student_code"]])
     if student_doc.get("parent_email"):
-        send_email(
-            student_doc["parent_email"],
-            f"Enrolment confirmed — {os.environ.get('ACADEMY_NAME')}",
-            f"<p>Dear {student_doc['parent_name']},</p>"
-            f"<p>We're delighted to confirm <b>{student_doc['full_name']}</b>'s enrolment. "
-            f"Student ID: <b>{student_doc['student_code']}</b>.</p>"
-            f"<p>See you at the board!</p>",
-        )
+        send_template_email(student_doc["parent_email"], "registration_confirmed", {
+            "parent_name": student_doc["parent_name"],
+            "student_name": student_doc["full_name"],
+            "student_code": student_doc["student_code"],
+        })
     return {"id": str(res.inserted_id), "student_code": student_doc["student_code"]}
 
 @api.delete("/registrations/{rid}")

@@ -5,15 +5,19 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Plus, Users, Pencil, Trash2 } from "lucide-react";
+import { Plus, Users, Pencil, Trash2, MessageCircle, ExternalLink } from "lucide-react";
 import { toast } from "sonner";
 
 const DAYS = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
-const empty = { name:"", level_id:"", coach_id:"", schedule_days:[], session_time:"", venue:"", max_capacity:20, status:"active" };
+const empty = {
+  name:"", level_id:"", coach_id:"", schedule_days:[], session_time:"", venue:"",
+  max_capacity:20, status:"active", whatsapp_group_link:"", whatsapp_group_recipient:"",
+};
 const pickForm = (b) => ({
   name: b.name || "", level_id: b.level_id || "", coach_id: b.coach_id || "",
   schedule_days: b.schedule_days || [], session_time: b.session_time || "",
   venue: b.venue || "", max_capacity: b.max_capacity ?? 20, status: b.status || "active",
+  whatsapp_group_link: b.whatsapp_group_link || "", whatsapp_group_recipient: b.whatsapp_group_recipient || "",
 });
 
 export default function Batches() {
@@ -23,6 +27,7 @@ export default function Batches() {
   const [open, setOpen] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState(empty);
+  const [sendingId, setSendingId] = useState(null);
 
   const load = () => api.get("/batches").then((r) => setItems(r.data));
   useEffect(() => {
@@ -60,6 +65,25 @@ export default function Batches() {
 
   const toggleDay = (d) =>
     setForm((f)=>({ ...f, schedule_days: f.schedule_days.includes(d) ? f.schedule_days.filter(x=>x!==d) : [...f.schedule_days, d] }));
+
+  const sendBatchWhatsapp = async (b) => {
+    setSendingId(b.id);
+    try {
+      const { data } = await api.post(`/batches/${b.id}/whatsapp`, {
+        template: "batch_announcement",
+        title: "Class update",
+        event_date: new Date().toISOString().slice(0, 10),
+      });
+      if (data.whatsapp?.sent) toast.success("Batch WhatsApp template sent");
+      else if (data.group_link) {
+        window.open(data.group_link, "_blank", "noopener,noreferrer");
+        toast.success("Opened linked WhatsApp group");
+      } else {
+        toast.info("Add a WhatsApp group link or recipient for this batch");
+      }
+    } catch (ex) { toast.error(formatApiError(ex.response?.data?.detail)); }
+    finally { setSendingId(null); }
+  };
 
   return (
     <>
@@ -105,6 +129,12 @@ export default function Batches() {
                 <Field label="Max Capacity">
                   <Input type="number" data-testid="bf-capacity" value={form.max_capacity} onChange={(e)=>setForm({...form, max_capacity:e.target.value})} />
                 </Field>
+                <Field label="WhatsApp Group Link" full>
+                  <Input data-testid="bf-wa-group" placeholder="https://chat.whatsapp.com/..." value={form.whatsapp_group_link} onChange={(e)=>setForm({...form, whatsapp_group_link:e.target.value})} />
+                </Field>
+                <Field label="WhatsApp Template Recipient" full>
+                  <Input data-testid="bf-wa-recipient" placeholder="+91... or approved recipient ID" value={form.whatsapp_group_recipient} onChange={(e)=>setForm({...form, whatsapp_group_recipient:e.target.value})} />
+                </Field>
                 <Field label="Schedule Days" full>
                   <div className="flex flex-wrap gap-2">
                     {DAYS.map((d)=>(
@@ -136,7 +166,15 @@ export default function Batches() {
             <div className="flex flex-wrap gap-1 mt-3">
               {(b.schedule_days||[]).map((d)=>(<span key={d} className="ck-pill ck-pill-black">{d}</span>))}
             </div>
+            {b.whatsapp_group_link && (
+              <a href={b.whatsapp_group_link} target="_blank" rel="noreferrer" className="text-xs text-[var(--ck-orange)] mt-3 inline-flex items-center gap-1">
+                <ExternalLink size={12}/> WhatsApp group
+              </a>
+            )}
             <div className="flex gap-2 mt-4 pt-3 border-t border-[var(--ck-line)]">
+              <button className="att-btn flex items-center gap-1" onClick={()=>sendBatchWhatsapp(b)} disabled={sendingId === b.id} data-testid={`batch-whatsapp-${b.id}`}>
+                <MessageCircle size={12}/> {sendingId === b.id ? "Sending" : "WhatsApp"}
+              </button>
               <button className="att-btn flex items-center gap-1" onClick={()=>startEdit(b)} data-testid={`batch-edit-${b.id}`}>
                 <Pencil size={12}/> Edit
               </button>

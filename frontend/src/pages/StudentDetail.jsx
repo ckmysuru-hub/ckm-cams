@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useParams, Link, useNavigate } from "react-router-dom";
 import { api, formatApiError, pdfUrl } from "@/lib/api";
+import { renderWhatsAppTemplate } from "@/lib/whatsappTemplates";
 import PageHeader from "@/components/PageHeader";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -94,9 +95,11 @@ export default function StudentDetail() {
   const shareWhatsApp = () => {
     if (!portalUrl || !s) return;
     const num = (s.parent_whatsapp || "").replace(/[^\d]/g, "");
-    const msg = encodeURIComponent(
-      `Hello ${s.parent_name || ""},\n\nHere is your private parent portal for ${s.full_name} at Chess Klub Mysuru — attendance, invoices and receipts in one place:\n${portalUrl}\n\nThis link is private. Please don't share it.`
-    );
+    const msg = encodeURIComponent(renderWhatsAppTemplate("parent_portal_link", {
+      parentName: s.parent_name,
+      studentName: s.full_name,
+      portalUrl,
+    }));
     const url = num ? `https://wa.me/${num}?text=${msg}` : `https://wa.me/?text=${msg}`;
     window.open(url, "_blank");
   };

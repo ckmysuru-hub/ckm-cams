@@ -112,10 +112,6 @@ export default function Login() {
             Enter the board
           </button>
 
-          <div className="mt-8 text-xs text-[var(--ck-muted)] leading-relaxed border-t border-[var(--ck-line)] pt-5">
-            <div className="font-semibold text-[var(--ck-ink)] mb-1">Demo account</div>
-            admin@chessklub.in &nbsp;·&nbsp; Admin@123
-          </div>
         </form>
       </div>
     </div>

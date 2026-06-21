@@ -106,7 +106,7 @@ export default function Kiosk() {
               data-testid="kiosk-code-input"
               value={code}
               onChange={(e) => setCode(e.target.value.toUpperCase())}
-              placeholder="STU-2026-XXXX"
+              placeholder="CKM-XXXXX"
               className="w-full px-6 py-5 text-2xl text-center font-mono tracking-wider rounded-2xl border-2 border-[var(--ck-line)] bg-white focus:outline-none focus:border-[var(--ck-black)]"
               autoComplete="off"
             />
