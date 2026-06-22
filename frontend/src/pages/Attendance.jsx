@@ -87,7 +87,7 @@ export default function Attendance() {
           <div className="text-xs uppercase tracking-wider font-semibold text-[var(--ck-muted)] mb-1">Session Date</div>
           <Input type="date" data-testid="att-date" value={date} onChange={(e)=>setDate(e.target.value)} />
         </div>
-        <div className="flex gap-2 justify-end">
+        <div className="flex flex-col sm:flex-row gap-2 justify-end">
           <button className="ck-btn-ghost" onClick={()=>setAll("P")} disabled={!students.length} data-testid="mark-all-present">Mark all Present</button>
           <button className="ck-btn-ghost flex items-center gap-2" onClick={exportCsv} data-testid="att-export">
             <Download size={14}/> Export

@@ -122,3 +122,80 @@ body {
 .att-btn.active.L  { background: #f1f5f9; border-color: #475569; color: #475569; }
 .att-btn.active.LT { background: var(--ck-orange-soft); border-color: var(--ck-orange); color: var(--ck-orange); }
 .att-btn.active.H  { background: #f5f3ff; border-color: #6d28d9; color: #6d28d9; }
+
+.mobile-nav-scroll {
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+.mobile-nav-scroll::-webkit-scrollbar { display: none; }
+
+@media (max-width: 767px) {
+  html, body, #root { min-width: 0; }
+
+  .ck-card,
+  .ck-card-elevated {
+    border-radius: 12px;
+  }
+
+  .ck-card-elevated:has(table) {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .ck-table {
+    min-width: 720px;
+  }
+
+  .ck-table th,
+  .ck-table td {
+    white-space: nowrap;
+  }
+
+  .ck-btn-primary,
+  .ck-btn-ghost,
+  .att-btn {
+    min-height: 40px;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .ck-btn-primary,
+  .ck-btn-ghost {
+    display: inline-flex;
+  }
+
+  form.grid.grid-cols-2,
+  form .grid.grid-cols-2,
+  form .grid.grid-cols-3 {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  form .col-span-2,
+  form .col-span-3 {
+    grid-column: 1 / -1 !important;
+  }
+
+  [data-testid="invoice-form"] .grid-cols-12 {
+    grid-template-columns: minmax(0, 1fr) 96px 40px !important;
+  }
+
+  [data-testid="invoice-form"] .col-span-8,
+  [data-testid="invoice-form"] .col-span-3,
+  [data-testid="invoice-form"] .col-span-1 {
+    grid-column: auto !important;
+  }
+
+  [data-testid$="-toolbar"] {
+    align-items: stretch !important;
+  }
+
+  [data-testid$="-toolbar"] > * {
+    width: 100%;
+  }
+
+  [data-testid$="-toolbar"] [role="combobox"],
+  [data-testid$="-toolbar"] button,
+  [data-testid$="-toolbar"] label {
+    width: 100% !important;
+  }
+}

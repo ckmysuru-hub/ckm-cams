@@ -69,11 +69,59 @@ export default function Layout() {
         </div>
       </aside>
 
+      <header className="md:hidden fixed top-0 inset-x-0 z-40 bg-white/95 backdrop-blur border-b border-[var(--ck-line)] px-4 py-3">
+        <div className="flex items-center justify-between gap-3">
+          <Logo />
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="text-right min-w-0">
+              <div className="text-xs font-semibold truncate max-w-[130px]" data-testid="current-user-name-mobile">{user?.name}</div>
+              <div className="text-[10px] text-[var(--ck-muted)] capitalize truncate">{user?.role?.replace("_", " ")}</div>
+            </div>
+            <button
+              data-testid="logout-btn-mobile"
+              onClick={async () => { await logout(); nav("/login"); }}
+              className="h-9 w-9 inline-flex items-center justify-center rounded-full border border-[var(--ck-line)] text-[var(--ck-muted)]"
+              aria-label="Logout"
+            >
+              <LogOut size={15} />
+            </button>
+          </div>
+        </div>
+      </header>
+
       <main className="flex-1 ck-knight-bg min-h-screen">
-        <div className="max-w-[1280px] mx-auto px-6 lg:px-10 py-8">
+        <div className="max-w-[1280px] mx-auto px-4 sm:px-6 lg:px-10 pt-24 md:pt-8 pb-28 md:pb-8">
           <Outlet />
         </div>
       </main>
+      <nav className="md:hidden fixed bottom-0 inset-x-0 z-40 bg-[var(--ck-black)] text-white border-t border-white/10" data-testid="mobile-nav">
+        <div className="flex overflow-x-auto mobile-nav-scroll px-2 py-2 gap-1">
+          {NAV.map(({ to, label, icon: Icon, end, testid }) => (
+            <NavLink
+              key={to}
+              to={to}
+              end={end}
+              data-testid={`${testid}-mobile`}
+              className={({ isActive }) =>
+                `min-w-[74px] flex flex-col items-center justify-center gap-1 rounded-lg px-2 py-2 text-[10px] ${isActive ? "bg-[var(--ck-orange)] text-white" : "text-white/70"}`
+              }
+            >
+              <Icon size={16} />
+              <span className="leading-none whitespace-nowrap">{label.replace(" & Fees", "")}</span>
+            </NavLink>
+          ))}
+          <a
+            href="/kiosk"
+            target="_blank"
+            rel="noreferrer"
+            data-testid="nav-kiosk-mobile"
+            className="min-w-[74px] flex flex-col items-center justify-center gap-1 rounded-lg px-2 py-2 text-[10px] text-white/70"
+          >
+            <ScanLine size={16} />
+            <span className="leading-none whitespace-nowrap">Kiosk</span>
+          </a>
+        </div>
+      </nav>
       <Toaster richColors position="top-right" />
     </div>
   );

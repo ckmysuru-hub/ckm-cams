@@ -41,7 +41,7 @@ export default function Dashboard() {
         subtitle="A snapshot of students, dues, and revenue across Chess Klub Mysuru."
       />
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
         <StatCard testid="stat-active-students" icon={Users} label="Active Students" value={s?.active_students ?? "—"} hint={`${s?.total_students ?? 0} total enrolled`} />
         <StatCard testid="stat-revenue" icon={TrendingUp} label="This Month Revenue" value={fmtINR(s?.this_month_revenue)} accent hint="Collected so far" />
         <StatCard testid="stat-pending" icon={Wallet} label="Pending Dues" value={fmtINR(s?.pending_amount)} hint="across all invoices" />
@@ -66,7 +66,7 @@ export default function Dashboard() {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-8">
         <div className="ck-card-elevated p-5 lg:col-span-2" data-testid="chart-revenue">
-          <div className="flex items-center justify-between mb-4">
+          <div className="flex items-start justify-between gap-3 mb-4">
             <div>
               <div className="text-xs uppercase tracking-wider text-[var(--ck-muted)] font-semibold">Revenue Trend</div>
               <div className="ck-display text-xl font-semibold">Last 6 months</div>
@@ -103,7 +103,7 @@ export default function Dashboard() {
       </div>
 
       <div className="ck-card-elevated p-5" data-testid="pending-table">
-        <div className="flex items-center justify-between mb-4">
+        <div className="flex items-start justify-between gap-3 mb-4">
           <div>
             <div className="text-xs uppercase tracking-wider text-[var(--ck-muted)] font-semibold">Action needed</div>
             <div className="ck-display text-xl font-semibold">Pending invoices</div>

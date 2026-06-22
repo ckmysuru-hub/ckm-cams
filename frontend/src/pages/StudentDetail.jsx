@@ -203,7 +203,7 @@ export default function StudentDetail() {
               <div className="ck-input rounded-lg px-3 py-2 text-xs font-mono break-all" data-testid="magiclink-url">
                 {portalUrl}
               </div>
-              <div className="flex gap-2 mt-3">
+              <div className="flex flex-col sm:flex-row gap-2 mt-3">
                 <button onClick={copyLink} data-testid="magiclink-copy" className="ck-btn-ghost flex-1 flex items-center justify-center gap-2 text-sm">
                   <Copy size={14}/> Copy
                 </button>
@@ -223,12 +223,12 @@ export default function StudentDetail() {
         <div className="ck-card-elevated p-5">
           <div className="text-xs uppercase tracking-wider font-semibold text-[var(--ck-muted)] mb-3">Invoices</div>
           {inv.length ? inv.map((i)=>(
-            <div key={i.id} className="flex items-center justify-between py-2 border-t border-[var(--ck-line)] first:border-0">
-              <div>
+            <div key={i.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 py-2 border-t border-[var(--ck-line)] first:border-0">
+              <div className="min-w-0">
                 <div className="font-mono text-xs">{i.invoice_no}</div>
                 <div className="text-xs text-[var(--ck-muted)]">{i.period} · due {i.due_date}</div>
               </div>
-              <div className="text-right">
+              <div className="text-left sm:text-right">
                 <div className="font-medium">{fmtINR(i.balance)}</div>
                 <span className={`ck-pill ${i.status==='paid'?'ck-pill-green':i.status==='partial'?'ck-pill-orange':'ck-pill-black'}`}>{i.status}</span>
               </div>
@@ -238,12 +238,12 @@ export default function StudentDetail() {
         <div className="ck-card-elevated p-5">
           <div className="text-xs uppercase tracking-wider font-semibold text-[var(--ck-muted)] mb-3">Receipts</div>
           {rec.length ? rec.map((r)=>(
-            <div key={r.id} className="flex items-center justify-between py-2 border-t border-[var(--ck-line)] first:border-0">
-              <div>
+            <div key={r.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 py-2 border-t border-[var(--ck-line)] first:border-0">
+              <div className="min-w-0">
                 <div className="font-mono text-xs">{r.receipt_no}</div>
                 <div className="text-xs text-[var(--ck-muted)]">{r.created_at?.slice(0,10)} · {r.mode}</div>
               </div>
-              <div className="text-right">
+              <div className="text-left sm:text-right">
                 <div className="font-medium">{fmtINR(r.amount)}</div>
                 <a className="text-xs text-[var(--ck-orange)] hover:underline" href={pdfUrl(`/api/receipts/${r.id}/pdf`)} target="_blank" rel="noreferrer">PDF</a>
               </div>

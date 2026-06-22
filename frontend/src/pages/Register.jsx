@@ -76,10 +76,10 @@ export default function Register() {
         <img src={LOGO_URL} alt="" className="absolute -right-24 -bottom-20 w-[460px] opacity-[0.10] pointer-events-none" />
       </div>
 
-      <div className="p-8 md:p-12 bg-[var(--ck-cream)] overflow-y-auto">
+      <div className="p-4 sm:p-8 md:p-12 bg-[var(--ck-cream)] overflow-y-auto">
         <div className="max-w-xl mx-auto">
           <div className="text-[11px] uppercase tracking-[0.2em] font-semibold text-[var(--ck-orange)] mb-2">Enroll your child</div>
-          <h1 className="ck-display text-4xl font-semibold mb-2">Tell us about the player.</h1>
+          <h1 className="ck-display text-3xl sm:text-4xl font-semibold mb-2">Tell us about the player.</h1>
           <p className="text-sm text-[var(--ck-muted)] mb-8">
             This goes to our coaches for review. We'll lock in the level and batch when we get back to you.
           </p>

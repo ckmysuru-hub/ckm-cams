@@ -61,18 +61,18 @@ export default function Kiosk() {
 
   return (
     <div className="min-h-screen flex flex-col" data-testid="kiosk-page" style={{ background: "var(--ck-cream)" }}>
-      <header className="px-8 py-5 border-b border-[var(--ck-line)] bg-white flex items-center justify-between">
+      <header className="px-4 sm:px-8 py-4 sm:py-5 border-b border-[var(--ck-line)] bg-white flex items-center justify-between gap-3">
         <Logo />
         <div className="text-right">
-          <div className="ck-display text-2xl font-semibold leading-none">{now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</div>
+          <div className="ck-display text-xl sm:text-2xl font-semibold leading-none">{now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</div>
           <div className="text-xs text-[var(--ck-muted)] mt-1">{now.toLocaleDateString([], { weekday: "long", day: "numeric", month: "short" })}</div>
         </div>
       </header>
 
       <main className="flex-1 grid lg:grid-cols-[1fr_360px]">
-        <div className="flex flex-col items-center justify-center p-8 lg:p-16">
+        <div className="flex flex-col items-center justify-center p-4 sm:p-8 lg:p-16">
           <div className="text-[11px] uppercase tracking-[0.3em] font-semibold text-[var(--ck-orange)] mb-2">Self check-in</div>
-          <h1 className="ck-display text-5xl lg:text-6xl font-semibold text-center mb-8 max-w-2xl leading-[1.05]">
+          <h1 className="ck-display text-4xl sm:text-5xl lg:text-6xl font-semibold text-center mb-8 max-w-2xl leading-[1.05]">
             Welcome to the board.
           </h1>
 
@@ -166,7 +166,7 @@ export default function Kiosk() {
           )}
         </div>
 
-        <aside className="bg-white border-l border-[var(--ck-line)] p-6 overflow-y-auto" data-testid="kiosk-recent">
+        <aside className="bg-white border-t lg:border-t-0 lg:border-l border-[var(--ck-line)] p-4 sm:p-6 overflow-y-auto" data-testid="kiosk-recent">
           <div className="text-[11px] uppercase tracking-[0.2em] font-semibold text-[var(--ck-orange)] mb-1">Today on the board</div>
           <div className="ck-display text-xl font-semibold mb-4">{recent.length} check-in{recent.length === 1 ? "" : "s"}</div>
           <div className="space-y-2">

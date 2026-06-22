@@ -171,7 +171,7 @@ export default function Batches() {
                 <ExternalLink size={12}/> WhatsApp group
               </a>
             )}
-            <div className="flex gap-2 mt-4 pt-3 border-t border-[var(--ck-line)]">
+            <div className="flex flex-wrap gap-2 mt-4 pt-3 border-t border-[var(--ck-line)]">
               <button className="att-btn flex items-center gap-1" onClick={()=>sendBatchWhatsapp(b)} disabled={sendingId === b.id} data-testid={`batch-whatsapp-${b.id}`}>
                 <MessageCircle size={12}/> {sendingId === b.id ? "Sending" : "WhatsApp"}
               </button>

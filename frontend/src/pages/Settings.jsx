@@ -143,7 +143,7 @@ export default function Settings() {
 
       {user?.role === "director" && (
         <div className="ck-card-elevated p-2">
-          <div className="flex items-center justify-between p-3">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-3">
             <div>
               <div className="text-xs uppercase tracking-wider font-semibold text-[var(--ck-muted)]">Team</div>
               <div className="ck-display text-xl font-semibold">User accounts</div>
@@ -200,7 +200,7 @@ export default function Settings() {
 
 function IntegrationRow({ label, enabled }) {
   return (
-    <div className="flex items-center justify-between py-2 border-t border-[var(--ck-line)] first:border-0">
+    <div className="flex items-center justify-between gap-3 py-2 border-t border-[var(--ck-line)] first:border-0">
       <div className="text-sm">{label}</div>
       <div className={`flex items-center gap-1 text-xs font-semibold ${enabled ? "text-green-700" : "text-[var(--ck-muted)]"}`}>
         {enabled ? <><CheckCircle2 size={14}/> Live</> : <><XCircle size={14}/> Log only</>}

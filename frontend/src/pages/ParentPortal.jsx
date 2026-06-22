@@ -38,24 +38,24 @@ export default function ParentPortal() {
 
   return (
     <div className="min-h-screen" data-testid="portal-page" style={{ background: "var(--ck-cream)" }}>
-      <header className="bg-white border-b border-[var(--ck-line)] px-6 py-5">
-        <div className="max-w-4xl mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-3">
+      <header className="bg-white border-b border-[var(--ck-line)] px-4 sm:px-6 py-5">
+        <div className="max-w-4xl mx-auto flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3 min-w-0">
             {academy?.logo_url && <img src={academy.logo_url} alt="" className="w-10 h-10 object-contain" />}
-            <div>
-              <div className="ck-display text-lg font-semibold">{academy?.name}</div>
-              <div className="text-xs text-[var(--ck-muted)]">{academy?.phone} · {academy?.email}</div>
+            <div className="min-w-0">
+              <div className="ck-display text-lg font-semibold truncate">{academy?.name}</div>
+              <div className="text-xs text-[var(--ck-muted)] truncate">{academy?.phone} · {academy?.email}</div>
             </div>
           </div>
           <span className="ck-pill ck-pill-orange">Parent Portal</span>
         </div>
       </header>
 
-      <main className="max-w-4xl mx-auto px-6 py-8">
+      <main className="max-w-4xl mx-auto px-4 sm:px-6 py-8">
         {/* Hero */}
         <div className="mb-6">
           <div className="text-[11px] uppercase tracking-[0.2em] font-semibold text-[var(--ck-orange)] mb-2">Welcome, {student.parent_name || "Parent"}</div>
-          <h1 className="ck-display text-4xl md:text-5xl font-semibold leading-tight" data-testid="portal-student-name">{student.name}</h1>
+          <h1 className="ck-display text-3xl sm:text-4xl md:text-5xl font-semibold leading-tight" data-testid="portal-student-name">{student.name}</h1>
           <div className="text-sm text-[var(--ck-muted)] mt-2 flex flex-wrap gap-3">
             <span className="font-mono">{student.code}</span>
             {student.level && <span className="flex items-center gap-1"><GraduationCap size={14}/> {student.level}</span>}
@@ -64,7 +64,7 @@ export default function ParentPortal() {
         </div>
 
         {/* Stat cards */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
           <StatCard label="Attendance" value={`${attendance.percentage}%`} hint={`${attendance.counts.P + attendance.counts.LT} of ${attendance.counts.P + attendance.counts.A + attendance.counts.L + attendance.counts.LT} sessions`} />
           <StatCard label="Outstanding" value={fmtINR(invoices.reduce((a,b)=>a + (b.balance||0), 0))} hint={`${invoices.filter(i=>i.status!=='paid').length} pending`} accent />
           <StatCard label="Receipts" value={receipts.length} hint="payments received" />
@@ -98,12 +98,12 @@ export default function ParentPortal() {
           <div data-testid="portal-invoices">
             {invoices.length === 0 && <div className="text-sm text-[var(--ck-muted)]">No invoices yet.</div>}
             {invoices.map((inv) => (
-              <div key={inv.id} className="flex items-center justify-between py-3 border-t border-[var(--ck-line)] first:border-0">
-                <div>
+              <div key={inv.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 py-3 border-t border-[var(--ck-line)] first:border-0">
+                <div className="min-w-0">
                   <div className="font-mono text-xs">{inv.invoice_no}</div>
                   <div className="text-xs text-[var(--ck-muted)]">{inv.period} · due {inv.due_date}</div>
                 </div>
-                <div className="text-right flex items-center gap-3">
+                <div className="text-left sm:text-right flex items-center justify-between sm:justify-end gap-3">
                   <div>
                     <div className="font-medium">{fmtINR(inv.amount)}</div>
                     <span className={`ck-pill ${inv.status === 'paid' ? 'ck-pill-green' : inv.status === 'partial' ? 'ck-pill-orange' : 'ck-pill-black'}`}>{inv.status}</span>
@@ -126,12 +126,12 @@ export default function ParentPortal() {
           <div data-testid="portal-receipts">
             {receipts.length === 0 && <div className="text-sm text-[var(--ck-muted)]">No receipts yet.</div>}
             {receipts.map((r) => (
-              <div key={r.id} className="flex items-center justify-between py-3 border-t border-[var(--ck-line)] first:border-0">
-                <div>
+              <div key={r.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 py-3 border-t border-[var(--ck-line)] first:border-0">
+                <div className="min-w-0">
                   <div className="font-mono text-xs">{r.receipt_no}</div>
                   <div className="text-xs text-[var(--ck-muted)]">{r.created_at?.slice(0,10)} · {r.mode}</div>
                 </div>
-                <div className="text-right flex items-center gap-3">
+                <div className="text-left sm:text-right flex items-center justify-between sm:justify-end gap-3">
                   <div className="font-medium text-green-700 flex items-center gap-1">
                     <CheckCircle2 size={12}/> {fmtINR(r.amount)}
                   </div>
