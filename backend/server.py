@@ -30,6 +30,8 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
 from reportlab.pdfgen import canvas as rl_canvas
+from reportlab.graphics.barcode import qr
+from reportlab.graphics.shapes import Drawing
 
 import requests
 import smtplib
@@ -447,6 +449,14 @@ def public_backend_url() -> str:
 def portal_pdf_url(student_id: str, doc_type: Literal["invoice", "receipt"], doc_id: str) -> str:
     token, _ = _portal_token(student_id)
     return f"{public_backend_url()}/api/portal/{quote(token, safe='')}/{doc_type}/{doc_id}/pdf"
+
+
+UPI_PAYMENT_TEMPLATE = "upi://pay?mc=8299&pa=yespay.bizsbiz14832@yesbankltd&pn=MEGHANA MOHAN .B&am={amount}"
+
+
+def invoice_upi_url(invoice: dict) -> str:
+    amount = f"{float(invoice.get('amount', 0) or 0):.2f}"
+    return UPI_PAYMENT_TEMPLATE.format(amount=amount)
 
 
 def send_fee_reminder_whatsapp(to_phone: str, invoice: dict) -> dict:
@@ -908,11 +918,13 @@ async def remind_invoice(iid: str, user: dict = Depends(require_role("finance", 
     if inv.get("parent_whatsapp"):
         wa_result = send_fee_reminder_whatsapp(inv["parent_whatsapp"], inv)
     if inv.get("parent_email"):
+        invoice_pdf_url = portal_pdf_url(str(inv.get("student_id", "")), "invoice", str(inv.get("_id", "")))
         email_result = send_template_email(inv["parent_email"], "payment_reminder", {
             "invoice_no": inv["invoice_no"],
             "student_name": inv.get("student_name", ""),
             "balance": money_text(inv.get("balance", 0)),
             "due_date": inv.get("due_date", ""),
+            "invoice_pdf_url": invoice_pdf_url,
         })
     return {"whatsapp": wa_result, "email": email_result}
 
@@ -955,10 +967,14 @@ async def record_payment(payload: PaymentIn, user: dict = Depends(require_role("
     if inv.get("parent_whatsapp"):
         send_payment_receipt_whatsapp(inv["parent_whatsapp"], inv, saved)
     if inv.get("parent_email"):
+        invoice_pdf_url = portal_pdf_url(str(inv.get("student_id", "")), "invoice", str(inv.get("_id", "")))
+        receipt_pdf_url = portal_pdf_url(str(saved.get("student_id", "")), "receipt", str(saved.get("id", "")))
         send_template_email(inv["parent_email"], "payment_receipt", {
             "receipt_no": receipt_no,
             "amount": money_text(payload.amount),
             "invoice_no": inv["invoice_no"],
+            "invoice_pdf_url": invoice_pdf_url,
+            "receipt_pdf_url": receipt_pdf_url,
         })
     return saved
 
@@ -1007,8 +1023,41 @@ def _academy_block():
         f"Email: {os.environ.get('ACADEMY_EMAIL', '')}",
     ]
 
+def _qr_flowable(value: str, size_mm: int = 32) -> Drawing:
+    widget = qr.QrCodeWidget(value)
+    bounds = widget.getBounds()
+    width = bounds[2] - bounds[0]
+    height = bounds[3] - bounds[1]
+    size = size_mm * mm
+    drawing = Drawing(size, size, transform=[size / width, 0, 0, size / height, 0, 0])
+    drawing.add(widget)
+    return drawing
+
+
+def _paid_seal(canvas, doc) -> None:
+    canvas.saveState()
+    try:
+        canvas.setFillAlpha(0.14)
+        canvas.setStrokeAlpha(0.45)
+    except Exception:
+        pass
+    green = colors.HexColor("#1f9d55")
+    x = A4[0] - 43 * mm
+    y = A4[1] - 70 * mm
+    canvas.setStrokeColor(green)
+    canvas.setFillColor(green)
+    canvas.setLineWidth(1.4)
+    canvas.circle(x, y, 17 * mm, stroke=1, fill=0)
+    canvas.setFont("Helvetica-Bold", 18)
+    canvas.drawCentredString(x, y - 2 * mm, "PAID")
+    canvas.setFont("Helvetica", 7)
+    canvas.drawCentredString(x, y - 9 * mm, "INVOICE PAID")
+    canvas.restoreState()
+
+
 def _build_pdf(title: str, doc_no: str, doc_date: str, student_lines: List[str],
-               rows: List[List[str]], totals: List[List[str]], footer_lines: List[str]) -> bytes:
+               rows: List[List[str]], totals: List[List[str]], footer_lines: List[str],
+               qr_value: Optional[str] = None, watermark: Optional[str] = None) -> bytes:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=15 * mm, rightMargin=15 * mm,
                             topMargin=15 * mm, bottomMargin=15 * mm)
@@ -1087,11 +1136,31 @@ def _build_pdf(title: str, doc_no: str, doc_date: str, student_lines: List[str],
     elements.append(tot)
     elements.append(Spacer(1, 16))
 
+    if qr_value:
+        qr_table = Table(
+            [[_qr_flowable(qr_value), Paragraph("<b>Scan to pay by UPI</b><br/>Amount is linked to this invoice.",
+                                                ParagraphStyle('qr_text', fontSize=9, leading=12, textColor=GRAY))]],
+            colWidths=[38 * mm, 142 * mm],
+        )
+        qr_table.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("BOX", (0, 0), (-1, -1), 0.4, GRAY),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ]))
+        elements.append(qr_table)
+        elements.append(Spacer(1, 12))
+
     # Footer
     for line in footer_lines:
         elements.append(Paragraph(line, ParagraphStyle('f', fontSize=9, leading=12, textColor=GRAY)))
 
-    doc.build(elements)
+    if watermark == "PAID":
+        doc.build(elements, onFirstPage=_paid_seal, onLaterPages=_paid_seal)
+    else:
+        doc.build(elements)
     buf.seek(0)
     return buf.read()
 
@@ -1114,7 +1183,8 @@ async def invoice_pdf(iid: str, user: dict = Depends(get_current_user)):
         "This is a computer-generated invoice.",
         "For queries, contact the academy office.",
     ]
-    pdf = _build_pdf("INVOICE", inv["invoice_no"], inv["issued_at"][:10], student_lines, rows, totals, footer)
+    pdf = _build_pdf("INVOICE", inv["invoice_no"], inv["issued_at"][:10], student_lines, rows, totals, footer,
+                     qr_value=invoice_upi_url(inv))
     return StreamingResponse(io.BytesIO(pdf), media_type="application/pdf",
                              headers={"Content-Disposition": f'inline; filename="{inv["invoice_no"]}.pdf"'})
 
@@ -1139,7 +1209,8 @@ async def receipt_pdf(rid: str, user: dict = Depends(get_current_user)):
         "Thank you for your payment.",
         "This is a computer-generated receipt.",
     ]
-    pdf = _build_pdf("PAYMENT RECEIPT", r["receipt_no"], r["created_at"][:10], student_lines, rows, totals, footer)
+    pdf = _build_pdf("PAYMENT RECEIPT", r["receipt_no"], r["created_at"][:10], student_lines, rows, totals, footer,
+                     watermark="PAID")
     return StreamingResponse(io.BytesIO(pdf), media_type="application/pdf",
                              headers={"Content-Disposition": f'inline; filename="{r["receipt_no"]}.pdf"'})
 
@@ -1553,7 +1624,8 @@ async def portal_invoice_pdf(token: str, iid: str):
         f"Due Date: {inv.get('due_date')}",
     ]
     footer = ["This is a computer-generated invoice.", "For queries, contact the academy office."]
-    pdf = _build_pdf("INVOICE", inv["invoice_no"], inv["issued_at"][:10], student_lines, rows, totals, footer)
+    pdf = _build_pdf("INVOICE", inv["invoice_no"], inv["issued_at"][:10], student_lines, rows, totals, footer,
+                     qr_value=invoice_upi_url(inv))
     return StreamingResponse(io.BytesIO(pdf), media_type="application/pdf",
                              headers={"Content-Disposition": f'inline; filename="{inv["invoice_no"]}.pdf"'})
 
@@ -1575,7 +1647,8 @@ async def portal_receipt_pdf(token: str, rid: str):
         f"Received By: {r.get('received_by', '')}",
     ]
     footer = ["Thank you for your payment.", "This is a computer-generated receipt."]
-    pdf = _build_pdf("PAYMENT RECEIPT", r["receipt_no"], r["created_at"][:10], student_lines, rows, totals, footer)
+    pdf = _build_pdf("PAYMENT RECEIPT", r["receipt_no"], r["created_at"][:10], student_lines, rows, totals, footer,
+                     watermark="PAID")
     return StreamingResponse(io.BytesIO(pdf), media_type="application/pdf",
                              headers={"Content-Disposition": f'inline; filename="{r["receipt_no"]}.pdf"'})
 
