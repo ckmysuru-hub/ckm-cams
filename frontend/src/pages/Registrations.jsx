@@ -190,7 +190,7 @@ export default function Registrations() {
               </div>
 
               <p className="text-xs text-[var(--ck-muted)] leading-relaxed">
-                On confirm: a new student record will be created with auto-assigned ID (CKM-NNNNN), and a welcome WhatsApp + email will be sent to the parent.
+                On confirm: a new student record will be created with auto-assigned ID (CKM-10001+), and a welcome WhatsApp + email will be sent to the parent.
               </p>
 
               <div className="flex justify-end gap-2">

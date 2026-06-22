@@ -36,11 +36,12 @@ export default function Kiosk() {
 
   const submit = async (e) => {
     e?.preventDefault?.();
-    if (!code.trim()) return;
+    const codeNumber = code.replace(/\D/g, "");
+    if (!codeNumber) return;
     setBusy(true); setFeedback(null);
     try {
       const path = mode === "in" ? "/kiosk/checkin" : "/kiosk/checkout";
-      const { data } = await api.post(path, { code: code.trim() });
+      const { data } = await api.post(path, { code: `CKM-${codeNumber}` });
       setFeedback({ ok: true, ...data, mode });
       setCode("");
       setTimeout(() => setFeedback(null), 5000);
@@ -56,7 +57,7 @@ export default function Kiosk() {
   const pad = (k) => {
     if (k === "back") setCode((c) => c.slice(0, -1));
     else if (k === "clear") setCode("");
-    else setCode((c) => (c + k).toUpperCase());
+    else setCode((c) => (c + k).replace(/\D/g, ""));
   };
 
   return (
@@ -101,15 +102,21 @@ export default function Kiosk() {
             <label className="text-xs font-semibold uppercase tracking-wider text-[var(--ck-muted)] mb-2 block text-center">
               Enter your student code
             </label>
-            <input
-              ref={inputRef}
-              data-testid="kiosk-code-input"
-              value={code}
-              onChange={(e) => setCode(e.target.value.toUpperCase())}
-              placeholder="CKM-XXXXX"
-              className="w-full px-6 py-5 text-2xl text-center font-mono tracking-wider rounded-2xl border-2 border-[var(--ck-line)] bg-white focus:outline-none focus:border-[var(--ck-black)]"
-              autoComplete="off"
-            />
+            <div className="flex rounded-2xl border-2 border-[var(--ck-line)] bg-white overflow-hidden focus-within:border-[var(--ck-black)]">
+              <div className="px-5 py-5 text-2xl font-mono tracking-wider bg-[var(--ck-cream)] border-r border-[var(--ck-line)] text-[var(--ck-muted)]">
+                CKM-
+              </div>
+              <input
+                ref={inputRef}
+                data-testid="kiosk-code-input"
+                value={code}
+                onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
+                placeholder="10001"
+                inputMode="numeric"
+                className="min-w-0 flex-1 px-6 py-5 text-2xl text-center font-mono tracking-wider bg-white focus:outline-none"
+                autoComplete="off"
+              />
+            </div>
 
             <div className="grid grid-cols-3 gap-2 mt-4">
               {["1","2","3","4","5","6","7","8","9"].map((k)=>(
@@ -128,7 +135,7 @@ export default function Kiosk() {
 
             <button
               type="submit"
-              disabled={busy || !code.trim()}
+              disabled={busy || !code.replace(/\D/g, "")}
               data-testid="kiosk-submit"
               className="mt-5 w-full py-4 rounded-2xl text-base font-semibold bg-[var(--ck-black)] text-white hover:bg-[var(--ck-orange)] disabled:opacity-50 transition flex items-center justify-center gap-2"
             >

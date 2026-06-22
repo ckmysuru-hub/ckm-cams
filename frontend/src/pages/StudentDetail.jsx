@@ -3,6 +3,7 @@ import { useParams, Link, useNavigate } from "react-router-dom";
 import { api, formatApiError, pdfUrl } from "@/lib/api";
 import { renderWhatsAppTemplate } from "@/lib/whatsappTemplates";
 import PageHeader from "@/components/PageHeader";
+import PhoneNumberInput from "@/components/PhoneNumberInput";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -287,7 +288,13 @@ export default function StudentDetail() {
                 <Input value={form.parent_name} onChange={(e)=>setForm({...form, parent_name:e.target.value})} required />
               </DField>
               <DField label="Parent WhatsApp" required>
-                <Input value={form.parent_whatsapp} onChange={(e)=>setForm({...form, parent_whatsapp:e.target.value})} required />
+                <PhoneNumberInput
+                  value={form.parent_whatsapp}
+                  onChange={(parent_whatsapp)=>setForm({...form, parent_whatsapp})}
+                  inputTestId="sd-wa"
+                  selectTestId="sd-wa-country"
+                  required
+                />
               </DField>
               <DField label="Parent Email">
                 <Input type="email" value={form.parent_email} onChange={(e)=>setForm({...form, parent_email:e.target.value})} />

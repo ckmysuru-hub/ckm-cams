@@ -103,9 +103,10 @@ class TestStudents:
         s = r.json()
         assert "id" in s
         assert s.get("student_code", "").startswith("CKM-"), f"code={s.get('student_code')}"
-        # format CKM-NNNNN
+        # format CKM-NNNNN, starting at CKM-10001
         parts = s["student_code"].split("-")
         assert len(parts) == 2 and len(parts[1]) == 5 and parts[1].isdigit()
+        assert int(parts[1]) >= 10001
         state["student_id"] = s["id"]
 
         r = admin_session.get(f"{API}/students")

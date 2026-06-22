@@ -71,6 +71,7 @@ def configure_logging() -> logging.Logger:
 logger = configure_logging()
 
 APP_ENV = os.environ.get("APP_ENV", os.environ.get("ENVIRONMENT", "development")).lower()
+STUDENT_CODE_START = 10001
 
 
 def is_production() -> bool:
@@ -325,16 +326,18 @@ async def startup():
                                   {"$set": {"password_hash": hash_password(admin_pw)}})
         logger.warning("Admin password reset from ADMIN_PASSWORD because ADMIN_RESET_PASSWORD_ON_STARTUP=true")
 
-    # One-time migration: renumber students to CKM-00001 sorted by enrollment_date
+    # One-time migration: renumber students to CKM-10001 sorted by enrollment_date
     migrated = await db.counters.find_one({"key": "student-ckm-migrated"})
     if not migrated:
         students = await db.students.find({}).sort([("enrollment_date", 1), ("created_at", 1)]).to_list(10000)
-        for i, s in enumerate(students, start=1):
+        for s in students:
+            await db.students.update_one({"_id": s["_id"]}, {"$set": {"student_code": f"CKM-MIGRATING-{s['_id']}"}})
+        for i, s in enumerate(students, start=STUDENT_CODE_START):
             new_code = f"CKM-{i:05d}"
             await db.students.update_one({"_id": s["_id"]}, {"$set": {"student_code": new_code}})
         await db.counters.update_one(
             {"key": "student-ckm"},
-            {"$set": {"value": len(students)}},
+            {"$set": {"value": STUDENT_CODE_START + len(students) - 1 if students else STUDENT_CODE_START - 1}},
             upsert=True,
         )
         await db.counters.update_one(
@@ -343,7 +346,28 @@ async def startup():
             upsert=True,
         )
         if students:
-            logger.info(f"Migrated {len(students)} students to CKM-NNNNN format")
+            logger.info(f"Migrated {len(students)} students to CKM-10001+ format")
+
+    ckm_10001_migrated = await db.counters.find_one({"key": "student-ckm-10001-migrated"})
+    if not ckm_10001_migrated:
+        students = await db.students.find({}).sort([("enrollment_date", 1), ("created_at", 1)]).to_list(10000)
+        for s in students:
+            await db.students.update_one({"_id": s["_id"]}, {"$set": {"student_code": f"CKM-MIGRATING-{s['_id']}"}})
+        for i, s in enumerate(students, start=STUDENT_CODE_START):
+            new_code = f"CKM-{i:05d}"
+            await db.students.update_one({"_id": s["_id"]}, {"$set": {"student_code": new_code}})
+        await db.counters.update_one(
+            {"key": "student-ckm"},
+            {"$set": {"value": STUDENT_CODE_START + len(students) - 1 if students else STUDENT_CODE_START - 1}},
+            upsert=True,
+        )
+        await db.counters.update_one(
+            {"key": "student-ckm-10001-migrated"},
+            {"$set": {"value": 1, "at": iso(now_utc()), "count": len(students)}},
+            upsert=True,
+        )
+        if students:
+            logger.info(f"Migrated {len(students)} students to CKM-10001+ format")
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -359,6 +383,9 @@ async def next_counter(key: str) -> int:
 
 async def gen_student_code() -> str:
     n = await next_counter("student-ckm")
+    if n < STUDENT_CODE_START:
+        n = STUDENT_CODE_START
+        await db.counters.update_one({"key": "student-ckm"}, {"$set": {"value": n}}, upsert=True)
     return f"CKM-{n:05d}"
 
 async def gen_invoice_no() -> str:
@@ -1404,11 +1431,18 @@ async def _extend_subscription(student_id: str, plan: str, ref_date: Optional[da
 
 # ---------------------------- Kiosk: Self check-in / check-out ----------------------------
 class KioskAction(BaseModel):
-    code: str  # student_code like STU-2026-0001
+    code: str  # student_code like CKM-10001, or just the numeric suffix
+
+def normalize_kiosk_code(code: str) -> str:
+    raw = (code or "").strip().upper()
+    if raw.startswith("CKM-"):
+        return raw
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    return f"CKM-{digits}" if digits else raw
 
 @api.post("/kiosk/checkin")
 async def kiosk_checkin(payload: KioskAction):
-    code = payload.code.strip().upper()
+    code = normalize_kiosk_code(payload.code)
     student = await db.students.find_one({"student_code": code})
     if not student:
         raise HTTPException(404, "Student code not recognised. Please check with the front desk.")
@@ -1449,7 +1483,7 @@ async def kiosk_checkin(payload: KioskAction):
 
 @api.post("/kiosk/checkout")
 async def kiosk_checkout(payload: KioskAction):
-    code = payload.code.strip().upper()
+    code = normalize_kiosk_code(payload.code)
     student = await db.students.find_one({"student_code": code})
     if not student:
         raise HTTPException(404, "Student code not recognised.")

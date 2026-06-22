@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, formatApiError } from "@/lib/api";
 import PageHeader from "@/components/PageHeader";
+import PhoneNumberInput from "@/components/PhoneNumberInput";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
@@ -226,7 +227,13 @@ export default function Students() {
                   <Input data-testid="sf-parent" value={form.parent_name} onChange={(e)=>setForm({...form, parent_name:e.target.value})} required />
                 </Field>
                 <Field label="Parent WhatsApp" required>
-                  <Input data-testid="sf-wa" placeholder="+91..." value={form.parent_whatsapp} onChange={(e)=>setForm({...form, parent_whatsapp:e.target.value})} required />
+                  <PhoneNumberInput
+                    inputTestId="sf-wa"
+                    selectTestId="sf-wa-country"
+                    value={form.parent_whatsapp}
+                    onChange={(parent_whatsapp)=>setForm({...form, parent_whatsapp})}
+                    required
+                  />
                 </Field>
                 <Field label="Parent Email">
                   <Input type="email" data-testid="sf-email" value={form.parent_email} onChange={(e)=>setForm({...form, parent_email:e.target.value || ""})} />

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, formatApiError } from "@/lib/api";
 import PageHeader from "@/components/PageHeader";
+import PhoneNumberInput from "@/components/PhoneNumberInput";
 import { useAuth } from "@/contexts/AuthContext";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -99,9 +100,14 @@ export default function Settings() {
           <form onSubmit={sendTest} className="grid md:grid-cols-3 gap-3" data-testid="notify-test-form">
             <div>
               <label className="text-xs font-semibold uppercase tracking-wider text-[var(--ck-muted)]">WhatsApp Number</label>
-              <Input className="mt-1.5" placeholder="+91..." value={testForm.to_phone}
-                     onChange={(e)=>setTestForm({...testForm, to_phone: e.target.value})}
-                     data-testid="test-phone" />
+              <div className="mt-1.5">
+                <PhoneNumberInput
+                  value={testForm.to_phone}
+                  onChange={(to_phone)=>setTestForm({...testForm, to_phone})}
+                  inputTestId="test-phone"
+                  selectTestId="test-phone-country"
+                />
+              </div>
             </div>
             <div>
               <label className="text-xs font-semibold uppercase tracking-wider text-[var(--ck-muted)]">Email</label>

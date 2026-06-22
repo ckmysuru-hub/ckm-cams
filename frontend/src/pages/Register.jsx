@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, formatApiError, LOGO_URL } from "@/lib/api";
+import PhoneNumberInput from "@/components/PhoneNumberInput";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -115,7 +116,13 @@ export default function Register() {
               <Input data-testid="rf-parent" value={form.parent_name} onChange={(e)=>setForm({...form, parent_name:e.target.value})} required />
             </Field>
             <Field label="WhatsApp number" required>
-              <Input data-testid="rf-wa" placeholder="+91..." value={form.parent_whatsapp} onChange={(e)=>setForm({...form, parent_whatsapp:e.target.value})} required />
+              <PhoneNumberInput
+                inputTestId="rf-wa"
+                selectTestId="rf-wa-country"
+                value={form.parent_whatsapp}
+                onChange={(parent_whatsapp)=>setForm({...form, parent_whatsapp})}
+                required
+              />
             </Field>
             <Field label="Email" full>
               <Input data-testid="rf-email" type="email" value={form.parent_email} onChange={(e)=>setForm({...form, parent_email:e.target.value})} />
