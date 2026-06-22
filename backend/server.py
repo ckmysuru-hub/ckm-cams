@@ -736,7 +736,11 @@ async def create_student(payload: StudentIn, user: dict = Depends(require_role("
                                      [saved["full_name"], saved["student_code"], os.environ.get("ACADEMY_NAME", "")])
     if saved.get("parent_email"):
         send_template_email(saved["parent_email"], "student_welcome",
-                            {"student_name": saved["full_name"], "student_code": saved["student_code"]})
+                            {
+                                "parent_name": saved.get("parent_name", "Parent"),
+                                "student_name": saved["full_name"],
+                                "student_code": saved["student_code"],
+                            })
     return saved
 
 @api.get("/students/{sid}")

@@ -1,9 +1,14 @@
 from html import escape
 
 
+class SafeTemplateContext(dict):
+    def __missing__(self, key):
+        return ""
+
+
 EMAIL_TEMPLATES = {
     "student_welcome": {
-        "subject": "Welcome to {academy_name}, {student_name} ",
+        "subject": "Welcome to {academy_name}, {student_name}",
         "html": """
         <p>Hi {parent_name},</p>
 
@@ -46,9 +51,6 @@ EMAIL_TEMPLATES = {
         <strong> {academy_name}</strong><br>
         +91 89516 61957
     </p>
-            <p>Dear Parent,</p>
-            <p>Your child <b>{student_name}</b> has been enrolled at {academy_name}.</p>
-            <p>Student ID: <b>{student_code}</b>.</p>
         """,
     },
     "registration_received": {
@@ -99,5 +101,5 @@ EMAIL_TEMPLATES = {
 
 def render_email_template(name: str, context: dict) -> tuple[str, str]:
     template = EMAIL_TEMPLATES[name]
-    safe_context = {k: escape(str(v if v is not None else "")) for k, v in context.items()}
+    safe_context = SafeTemplateContext({k: escape(str(v if v is not None else "")) for k, v in context.items()})
     return template["subject"].format_map(safe_context), template["html"].format_map(safe_context)
