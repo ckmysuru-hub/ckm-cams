@@ -502,8 +502,8 @@ def send_fee_reminder_whatsapp(to_phone: str, invoice: dict) -> dict:
         whatsapp_template_language(),
         [
             invoice.get("invoice_no", ""),
-            money_text(invoice.get("balance", 0)),
             invoice.get("student_name", ""),
+            money_text(invoice.get("balance", 0)),
             invoice.get("due_date", ""),
             invoice_pdf_url,
         ],
@@ -518,8 +518,8 @@ def send_payment_receipt_whatsapp(to_phone: str, invoice: dict, receipt: dict) -
         template_name,
         whatsapp_template_language(),
         [
-            money_text(receipt.get("amount", 0)),
             invoice.get("student_name", ""),
+            money_text(receipt.get("amount", 0)),
             receipt.get("receipt_no", ""),
             receipt_pdf_url,
         ],
