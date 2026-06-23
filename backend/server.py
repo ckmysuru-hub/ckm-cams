@@ -1120,7 +1120,6 @@ def _qr_flowable(value: str, size_mm: int = 32) -> Drawing:
     drawing.add(widget)
     return drawing
 
-
 def _paid_seal(canvas, doc) -> None:
     canvas.saveState()
     try:
@@ -1128,18 +1127,41 @@ def _paid_seal(canvas, doc) -> None:
         canvas.setStrokeAlpha(0.45)
     except Exception:
         pass
-    green = colors.HexColor("#1f9d55")
-    x = A4[0] - 43 * mm
-    y = A4[1] - 70 * mm
-    canvas.setStrokeColor(green)
-    canvas.setFillColor(green)
+        
+    # 1. Change color to Red
+    red = colors.HexColor("#D32F2F")
+    canvas.setStrokeColor(red)
+    canvas.setFillColor(red)
     canvas.setLineWidth(1.4)
-    canvas.circle(x, y, 17 * mm, stroke=1, fill=0)
-    canvas.setFont("Helvetica-Bold", 18)
-    canvas.drawCentredString(x, y - 2 * mm, "PAID")
-    canvas.setFont("Helvetica", 7)
-    canvas.drawCentredString(x, y - 9 * mm, "INVOICE PAID")
-    canvas.restoreState()
+
+    # 2. Define rectangle dimensions
+    rect_width = 60 * mm
+    rect_height = 25 * mm
+
+    # 3. Move the canvas origin (0,0) to the exact center of the page
+    x_center = A4[0] / 2
+    y_center = A4[1] / 2
+    canvas.translate(x_center, y_center)
+
+    # 4. Rotate the canvas by 45 degrees
+    canvas.rotate(30)
+
+    # 5. Draw the rectangle centered around the new (0,0) origin
+    # Since (0,0) is now the center, the bottom-left corner is negative half width/height
+    rect_x = -(rect_width / 2)
+    rect_y = -(rect_height / 2)
+    canvas.rect(rect_x, rect_y, rect_width, rect_height, stroke=1, fill=0)
+
+    # 6. Draw the text centered at the new (0,0) origin
+    # "PAID" text slightly above the center line
+    canvas.setFont("Helvetica-Bold", 20)
+    canvas.drawCentredString(0, 1 * mm, "PAID")
+
+    # "INVOICE PAID" text slightly below the center line
+    canvas.setFont("Helvetica", 8)
+    canvas.drawCentredString(0, -6 * mm, "INVOICE PAID")
+
+    canvas.restoreState()    
 
 
 def _build_pdf(title: str, doc_no: str, doc_date: str, student_lines: List[str],

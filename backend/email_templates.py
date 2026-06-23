@@ -175,7 +175,6 @@ EMAIL_TEMPLATES = {
             <p>We have received <b>{amount}</b> towards invoice <b>{invoice_no}</b>.</p>
             <p>Receipt number: <b>{receipt_no}</b>.</p>
             <p><a href="{receipt_pdf_url}">View receipt PDF</a></p>
-            <p><a href="{invoice_pdf_url}">View invoice PDF</a></p>
                 <p>
         Warm Regards,<br>
         <strong> {academy_name}</strong><br>
