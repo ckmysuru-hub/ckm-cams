@@ -73,6 +73,13 @@ logger = configure_logging()
 APP_ENV = os.environ.get("APP_ENV", os.environ.get("ENVIRONMENT", "development")).lower()
 STUDENT_CODE_START = 10001
 
+level_urls = {
+    "Beginner Level 1": "https://my.chessklub.com/spaces/3728452/content",
+    "Beginner Level 2": "https://my.chessklub.com/spaces/3788367/content",
+    "Intermediate Level 1": "https://my.chessklub.com/spaces/3881675/content",
+    "Intermediate Level 2": "https://my.chessklub.com/spaces/17913432/content"
+}
+
 
 def is_production() -> bool:
     return APP_ENV in ("prod", "production")
@@ -570,6 +577,7 @@ def send_email(to_email: str, subject: str, html: str) -> dict:
         msg["Subject"] = subject
         msg["From"] = formataddr((os.environ.get("ACADEMY_NAME", "Chess Klub Mysuru"), gmail_user))
         msg["To"] = to_email
+        msg["CC"] = "chessklubmys@gmail.com"
         msg.attach(MIMEText(html, "html"))
         with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as server:
             server.login(gmail_user, gmail_pass.replace(" ", ""))
@@ -743,6 +751,53 @@ async def list_students(q: Optional[str] = None, batch_id: Optional[str] = None,
     students = await db.students.find(flt).sort("created_at", -1).to_list(1000)
     return [serialize_doc(s) for s in students]
 
+# helper to build email context with level / batch / coach names
+async def _student_email_context(student: dict) -> dict:
+    """
+    Given a student document (as stored in db.students), return a context dict
+    with keys: student_level, batch, batch_timing, coach_name.
+    Safe if batch_id/level_id/coach_id missing.
+    """
+    level_name = ""
+    batch_name = ""
+    batch_timing = ""
+    coach_name = ""
+    level_url = ""
+
+    if student.get("level_id"):
+        try:
+            lv = await db.levels.find_one({"_id": oid(student["level_id"])})
+            if lv:
+                level_name = lv.get("name", "") or ""
+                assigned_url = level_urls.get(level_name, "https://my.chessklub.com/spaces/default")
+        except HTTPException:
+            pass
+
+    if student.get("batch_id"):
+        try:
+            b = await db.batches.find_one({"_id": oid(student["batch_id"])})
+            if b:
+                batch_name = b.get("name", "") or ""
+                batch_timing = b.get("session_time", "") or ""
+                coach_id = b.get("coach_id")
+                if coach_id:
+                    try:
+                        coach = await db.users.find_one({"_id": oid(coach_id)})
+                        if coach:
+                            coach_name = coach.get("name", "") or ""
+                    except HTTPException:
+                        pass
+        except HTTPException:
+            pass
+
+    return {
+        "student_level": level_name,
+        "batch": batch_name,
+        "batch_timing": batch_timing,
+        "coach_name": coach_name,
+        "level_url": assigned_url
+    }
+
 @api.post("/students")
 async def create_student(payload: StudentIn, user: dict = Depends(require_role("ops_manager", "front_desk"))):
     doc = payload.model_dump()
@@ -762,11 +817,13 @@ async def create_student(payload: StudentIn, user: dict = Depends(require_role("
         send_named_whatsapp_template(saved["parent_whatsapp"], "student_welcome",
                                      [saved["full_name"], saved["student_code"], os.environ.get("ACADEMY_NAME", "")])
     if saved.get("parent_email"):
+        extra_ctx = await _student_email_context(saved)
         send_template_email(saved["parent_email"], "student_welcome",
                             {
                                 "parent_name": saved.get("parent_name", "Parent"),
                                 "student_name": saved["full_name"],
                                 "student_code": saved["student_code"],
+                                 **extra_ctx,
                             })
     return saved
 
@@ -1866,11 +1923,15 @@ async def confirm_registration(rid: str, payload: RegistrationConfirmIn,
     if student_doc.get("parent_whatsapp"):
         send_named_whatsapp_template(student_doc["parent_whatsapp"], "registration_confirmed",
                                      [student_doc["parent_name"], student_doc["full_name"], student_doc["student_code"]])
+    
     if student_doc.get("parent_email"):
-        send_template_email(student_doc["parent_email"], "registration_confirmed", {
+        extra_ctx = await _student_email_context(student_doc)
+        send_template_email(student_doc["parent_email"], "student_welcome", 
+        {
             "parent_name": student_doc["parent_name"],
             "student_name": student_doc["full_name"],
             "student_code": student_doc["student_code"],
+            **extra_ctx
         })
     return {"id": str(res.inserted_id), "student_code": student_doc["student_code"]}
 
