@@ -577,7 +577,6 @@ def send_email(to_email: str, subject: str, html: str) -> dict:
         msg["Subject"] = subject
         msg["From"] = formataddr((os.environ.get("ACADEMY_NAME", "Chess Klub Mysuru"), gmail_user))
         msg["To"] = to_email
-        msg["CC"] = "chessklubmys@gmail.com"
         msg.attach(MIMEText(html, "html"))
         with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as server:
             server.login(gmail_user, gmail_pass.replace(" ", ""))
