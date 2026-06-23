@@ -18,6 +18,25 @@ EMAIL_TEMPLATES = {
 
     <p>Below are the class details for {student_name}!</p>
 
+    <table>
+        <tr>
+            <td><strong>Student Level:</strong></td>
+            <td>{student_level}</td>
+        </tr>
+        <tr>
+            <td><strong>Batch:</strong></td>
+            <td>{batch}</td>
+        </tr>
+        <tr>
+            <td><strong>Batch Timing:</strong></td>
+            <td>{batch_timing}</td>
+        </tr>
+        <tr>
+            <td><strong>Coach Name:</strong></td>
+            <td>{coach_name}</td>
+        </tr>
+    </table>
+
     <hr>
 
     <h2>Onboarding</h2>
@@ -32,7 +51,7 @@ EMAIL_TEMPLATES = {
     <p><strong>STEP 2:</strong> Create an account with <a href="https://lichess.org" target="_blank">Lichess.org</a> (for Tournaments)</p>
 
     <p><strong>STEP 3:</strong> Download WhatsApp (if you already don’t have one. Else skip to Step 4)<br>
-    Please go to <a href="https://whatsapp.com/dl" target="_blank">whatsapp.com/dl</a> to download WhatsApp on your phone to receive important updates regarding class schedules, tournaments, and upcoming events at CHESS KLUB.</p>
+    Please go to <a href="https://whatsapp.com/dl" target="_blank">whatsapp.com/dl</a> to download WhatsApp on your phone to receive important updates regarding class schedules, tournaments, and u[...]
 
     <p><strong>STEP 4:</strong> Join the below WhatsApp Groups:</p>
     <ol type="a">
@@ -42,7 +61,7 @@ EMAIL_TEMPLATES = {
 
     <hr>
 
-    <p>Also, please find attached guidelines for the classes. Kindly read through and acknowledge the same. No response to this email will be assumed and considered as an acknowledgment to all the messages and no questions.</p>
+    <p>Also, please find attached guidelines for the classes. Kindly read through and acknowledge the same. No response to this email will be assumed and considered as an acknowledgment to all the[...]
 
     <p>Have a great day!</p>
 
