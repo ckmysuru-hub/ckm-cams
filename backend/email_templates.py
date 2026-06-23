@@ -143,7 +143,7 @@ EMAIL_TEMPLATES = {
 
     <hr>
 
-    <p>Also, please find attached guidelines for the classes. Kindly read through and acknowledge the same. No response to this email will be assumed and considered as an acknowledgment to all the[...]
+    <p>Also, please find <a href="https://drive.google.com/drive/folders/1OJObwgqvIuT7g3KuZzjx_JwyXejoxAAG"> attached guidelines </a> for the classes. Kindly read through and acknowledge the same. No response to this email will be assumed and considered as an acknowledgment to all the[...]
 
     <p>Have a great day!</p>
 
