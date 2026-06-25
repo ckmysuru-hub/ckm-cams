@@ -147,7 +147,7 @@ export default function StudentDetail() {
           <div className="flex items-center justify-between mb-3">
             <div>
               <div className="text-xs uppercase tracking-wider font-semibold text-[var(--ck-muted)]">Subscription</div>
-              <div className="ck-display text-xl font-semibold capitalize">{subscription?.plan || s.payment_plan || "monthly"} plan</div>
+              <div className="ck-display text-xl font-semibold capitalize">{subscription?.plan_label || subscription?.plan || s.payment_plan || "monthly"} plan</div>
             </div>
             <span className={`ck-pill ${
               subscription?.status === "active" ? "ck-pill-green" :
@@ -178,7 +178,7 @@ export default function StudentDetail() {
           )}
           <button onClick={extendSubscription} data-testid="sub-extend-btn"
             className="ck-btn-ghost mt-4 w-full flex items-center justify-center gap-2 text-sm">
-            <RefreshCw size={14}/> Extend by {{"monthly":30,"quarterly":90,"annual":365}[(subscription?.plan || s.payment_plan || "monthly")]} days
+            <RefreshCw size={14}/> Extend by {subscription?.plan_duration_days || {"monthly":30,"quarterly":90,"annual":365}[(subscription?.plan || s.payment_plan || "monthly")] || 30} days
           </button>
           <p className="text-[11px] text-[var(--ck-muted)] mt-2 leading-relaxed">
             Subscriptions auto-extend when a payment is recorded against an invoice. Use this only for manual adjustments.
@@ -306,6 +306,7 @@ export default function StudentDetail() {
                     <SelectItem value="monthly">Monthly</SelectItem>
                     <SelectItem value="quarterly">Quarterly</SelectItem>
                     <SelectItem value="annual">Annual</SelectItem>
+                    <SelectItem value="custom">Custom</SelectItem>
                   </SelectContent>
                 </Select>
               </DField>

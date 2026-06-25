@@ -8,6 +8,7 @@ import os
 import io
 import csv
 import uuid
+import asyncio
 import logging
 import secrets
 from datetime import datetime, timezone, timedelta, date
@@ -72,6 +73,8 @@ logger = configure_logging()
 
 APP_ENV = os.environ.get("APP_ENV", os.environ.get("ENVIRONMENT", "development")).lower()
 STUDENT_CODE_START = 10001
+AUTO_INVOICE_CHECK_INTERVAL_SECONDS = int(os.environ.get("AUTO_INVOICE_CHECK_INTERVAL_SECONDS", "21600"))
+auto_invoice_task: Optional[asyncio.Task] = None
 
 level_urls = {
     "Beginner Level 1": "https://my.chessklub.com/spaces/3728452/content",
@@ -231,7 +234,7 @@ class StudentIn(BaseModel):
     level_id: Optional[str] = None
     batch_id: Optional[str] = None
     enrollment_date: Optional[str] = None
-    payment_plan: Optional[str] = "monthly"  # monthly | quarterly | annual
+    payment_plan: Optional[str] = "monthly"  # monthly | quarterly | annual | custom
     subscription_start: Optional[str] = None
     subscription_end: Optional[str] = None
     concession_pct: Optional[float] = 0
@@ -266,6 +269,9 @@ class LevelIn(BaseModel):
     monthly_fee: float = 0
     quarterly_fee: float = 0
     annual_fee: float = 0
+    custom_plan_name: Optional[str] = "Custom"
+    custom_duration_days: int = 0
+    custom_fee: float = 0
     exam_fee: float = 0
     material_fee: float = 0
     late_penalty: float = 0
@@ -307,6 +313,7 @@ class UserCreate(BaseModel):
 # ---------------------------- Startup ----------------------------
 @app.on_event("startup")
 async def startup():
+    global auto_invoice_task
     await db.users.create_index("email", unique=True)
     await db.students.create_index("student_code", unique=True, sparse=True)
     await db.invoices.create_index("invoice_no", unique=True, sparse=True)
@@ -376,8 +383,19 @@ async def startup():
         if students:
             logger.info(f"Migrated {len(students)} students to CKM-10001+ format")
 
+    if auto_invoice_task is None or auto_invoice_task.done():
+        auto_invoice_task = asyncio.create_task(auto_subscription_invoice_loop())
+        logger.info("Started automatic subscription renewal invoice scheduler")
+
 @app.on_event("shutdown")
 async def shutdown():
+    global auto_invoice_task
+    if auto_invoice_task and not auto_invoice_task.done():
+        auto_invoice_task.cancel()
+        try:
+            await auto_invoice_task
+        except asyncio.CancelledError:
+            pass
     client.close()
 
 # ---------------------------- Counters / IDs ----------------------------
@@ -457,6 +475,7 @@ WHATSAPP_TEMPLATES = {
     "invoice_created": os.environ.get("WHATSAPP_INVOICE_CREATED_TEMPLATE", "invoice_created"),
     "notify_test": os.environ.get("WHATSAPP_NOTIFY_TEST_TEMPLATE", "notify_test"),
     "batch_announcement": os.environ.get("WHATSAPP_BATCH_ANNOUNCEMENT_TEMPLATE", "batch_announcement"),
+    "batch_group_invite": os.environ.get("WHATSAPP_BATCH_GROUP_INVITE_TEMPLATE", "batch_group_invite"),
 }
 
 
@@ -465,6 +484,47 @@ def send_named_whatsapp_template(to_phone: str, template_key: str, body_params: 
     if not template_name:
         raise HTTPException(400, f"Unknown WhatsApp template: {template_key}")
     return send_whatsapp_template(to_phone, template_name, whatsapp_template_language(), body_params)
+
+
+async def send_batch_group_invite(student: dict, batch: Optional[dict] = None,
+                                  created_by: Optional[str] = None, reason: str = "assigned") -> dict:
+    if not student.get("parent_whatsapp"):
+        return {"sent": False, "skipped": True, "reason": "missing_parent_whatsapp"}
+    batch_id = student.get("batch_id")
+    if not batch and batch_id:
+        try:
+            batch = await db.batches.find_one({"_id": oid(batch_id)})
+        except HTTPException:
+            batch = None
+    if not batch:
+        return {"sent": False, "skipped": True, "reason": "missing_batch"}
+    group_link = (batch.get("whatsapp_group_link") or "").strip()
+    if not group_link:
+        return {"sent": False, "skipped": True, "reason": "missing_group_link"}
+
+    params = [
+        student.get("parent_name") or "Parent",
+        student.get("full_name") or "",
+        batch.get("name") or "",
+        group_link,
+    ]
+    result = send_named_whatsapp_template(student["parent_whatsapp"], "batch_group_invite", params)
+    await db.whatsapp_group_invites.insert_one({
+        "student_id": str(student.get("_id") or student.get("id") or ""),
+        "student_code": student.get("student_code"),
+        "student_name": student.get("full_name"),
+        "parent_whatsapp": student.get("parent_whatsapp"),
+        "batch_id": str(batch.get("_id") or batch.get("id") or batch_id or ""),
+        "batch_name": batch.get("name"),
+        "group_link": group_link,
+        "template": "batch_group_invite",
+        "params": params,
+        "result": result,
+        "reason": reason,
+        "created_at": iso(now_utc()),
+        "created_by": created_by,
+    })
+    return result
 
 
 def money_text(amount) -> str:
@@ -726,6 +786,44 @@ async def send_batch_whatsapp(bid: str, payload: BatchWhatsappIn,
         "mode": "template" if recipient else "group_link",
     }
 
+@api.post("/batches/{bid}/invite-parents")
+async def send_batch_parent_invites(bid: str,
+                                    user: dict = Depends(require_role("ops_manager", "front_desk", "coach"))):
+    batch = await db.batches.find_one({"_id": oid(bid)})
+    if not batch:
+        raise HTTPException(404, "Batch not found")
+    if not (batch.get("whatsapp_group_link") or "").strip():
+        raise HTTPException(400, "Add the WhatsApp group link before sending parent invites")
+
+    students = await db.students.find({"batch_id": bid, "status": "active"}).sort("full_name", 1).to_list(1000)
+    results = []
+    sent = 0
+    skipped = 0
+    for student in students:
+        result = await send_batch_group_invite(student, batch, user["id"], "batch_invite_resend")
+        if result.get("skipped"):
+            skipped += 1
+        elif result.get("sent") or result.get("mode") == "log":
+            sent += 1
+        else:
+            skipped += 1
+        results.append({
+            "student_id": str(student["_id"]),
+            "student_name": student.get("full_name"),
+            "parent_whatsapp": student.get("parent_whatsapp"),
+            "result": result,
+        })
+
+    return {
+        "batch_id": bid,
+        "batch_name": batch.get("name"),
+        "group_link": batch.get("whatsapp_group_link") or "",
+        "total": len(students),
+        "sent": sent,
+        "skipped": skipped,
+        "results": results,
+    }
+
 @api.delete("/batches/{bid}")
 async def delete_batch(bid: str, _: dict = Depends(require_role("ops_manager"))):
     await db.batches.delete_one({"_id": oid(bid)})
@@ -815,6 +913,8 @@ async def create_student(payload: StudentIn, user: dict = Depends(require_role("
     if saved.get("parent_whatsapp"):
         send_named_whatsapp_template(saved["parent_whatsapp"], "student_welcome",
                                      [saved["full_name"], saved["student_code"], os.environ.get("ACADEMY_NAME", "")])
+        if saved.get("batch_id"):
+            await send_batch_group_invite(saved, created_by=user["id"], reason="student_created")
     if saved.get("parent_email"):
         extra_ctx = await _student_email_context(saved)
         send_template_email(saved["parent_email"], "student_welcome",
@@ -834,7 +934,7 @@ async def get_student(sid: str, user: dict = Depends(get_current_user)):
     return serialize_doc(s)
 
 @api.put("/students/{sid}")
-async def update_student(sid: str, payload: StudentIn, _: dict = Depends(require_role("ops_manager", "front_desk"))):
+async def update_student(sid: str, payload: StudentIn, user: dict = Depends(require_role("ops_manager", "front_desk"))):
     existing = await db.students.find_one({"_id": oid(sid)})
     if not existing:
         raise HTTPException(404, "Student not found")
@@ -848,7 +948,10 @@ async def update_student(sid: str, payload: StudentIn, _: dict = Depends(require
     if doc.get("subscription_end"):
         doc["subscription_plan"] = doc.get("payment_plan") or "monthly"
     await db.students.update_one({"_id": oid(sid)}, {"$set": doc})
-    return serialize_doc(await db.students.find_one({"_id": oid(sid)}))
+    updated = await db.students.find_one({"_id": oid(sid)})
+    if doc.get("batch_id") and doc.get("batch_id") != existing.get("batch_id"):
+        await send_batch_group_invite(updated, created_by=user["id"], reason="batch_assigned")
+    return serialize_doc(updated)
 
 @api.delete("/students/{sid}")
 async def delete_student(sid: str, _: dict = Depends(require_role("ops_manager"))):
@@ -967,6 +1070,96 @@ async def _build_invoice_doc(payload: InvoiceIn, user: dict) -> dict:
     }
     return inv
 
+def _send_invoice_created_notifications(inv: dict) -> None:
+    if inv.get("parent_whatsapp"):
+        send_named_whatsapp_template(inv["parent_whatsapp"], "invoice_created",
+                                     [inv["invoice_no"], inv["student_name"], money_text(inv["amount"]), inv["due_date"]])
+
+async def _create_plan_invoice_for_student(student: dict, level: dict, period: str, due_date: str,
+                                           user: dict, notes: str = "",
+                                           auto_subscription_end: Optional[str] = None) -> dict:
+    config = await _student_plan_config(student, level=level)
+    if config["plan"] == "custom" and int(config.get("days") or 0) <= 0:
+        raise HTTPException(400, "Custom plan needs a duration greater than 0 days")
+    if float(config.get("fee") or 0) <= 0:
+        raise HTTPException(400, f"No fee configured for {config.get('label') or config.get('plan')} plan")
+    item = InvoiceItem(
+        description=f"{level['name']} - {config['label']} fee",
+        amount=float(config["fee"]),
+    )
+    inv = await _build_invoice_doc(
+        InvoiceIn(student_id=str(student["_id"]), period=period, due_date=due_date, items=[item], notes=notes),
+        user,
+    )
+    inv["payment_plan"] = config["plan"]
+    inv["plan_label"] = config["label"]
+    inv["plan_duration_days"] = config["days"]
+    if auto_subscription_end:
+        inv["auto_subscription_end"] = auto_subscription_end
+        inv["auto_invoice_kind"] = "subscription_renewal"
+    return inv
+
+async def create_subscription_renewal_invoices(target_date: Optional[date] = None) -> dict:
+    target = target_date or (date.today() + timedelta(days=1))
+    target_iso = target.isoformat()
+    system_user = {"id": "system:auto-subscription-renewal"}
+    students = await db.students.find({
+        "status": "active",
+        "subscription_end": target_iso,
+    }).to_list(5000)
+    created, skipped = [], []
+    for student in students:
+        sid = str(student["_id"])
+        if await db.invoices.find_one({
+            "student_id": sid,
+            "auto_invoice_kind": "subscription_renewal",
+            "auto_subscription_end": target_iso,
+        }):
+            skipped.append({"student_id": sid, "reason": "already_created"})
+            continue
+        level = await _level_for_student(student)
+        if not level:
+            skipped.append({"student_id": sid, "reason": "level_missing"})
+            continue
+        try:
+            inv = await _create_plan_invoice_for_student(
+                student,
+                level,
+                period=f"Renewal {target_iso}",
+                due_date=target_iso,
+                user=system_user,
+                notes="Auto-generated 1 day before subscription end",
+                auto_subscription_end=target_iso,
+            )
+            res = await db.invoices.insert_one(inv)
+            saved = serialize_doc({**inv, "_id": res.inserted_id})
+            _send_invoice_created_notifications(saved)
+            created.append({"student_id": sid, "invoice_no": inv["invoice_no"], "amount": inv["amount"]})
+        except HTTPException as ex:
+            skipped.append({"student_id": sid, "reason": str(ex.detail)})
+        except Exception as ex:
+            logger.warning(f"Auto subscription invoice failed for student={sid}: {ex}")
+            skipped.append({"student_id": sid, "reason": "invoice_failed"})
+    if created or skipped:
+        await db.billing_runs.insert_one({
+            "kind": "subscription_renewal",
+            "target_date": target_iso,
+            "created": created,
+            "skipped": skipped,
+            "created_at": iso(now_utc()),
+        })
+    return {"target_date": target_iso, "created": created, "skipped": skipped, "total_created": len(created)}
+
+async def auto_subscription_invoice_loop() -> None:
+    while True:
+        try:
+            await create_subscription_renewal_invoices()
+        except asyncio.CancelledError:
+            raise
+        except Exception as ex:
+            logger.warning(f"Auto subscription invoice run failed: {ex}")
+        await asyncio.sleep(AUTO_INVOICE_CHECK_INTERVAL_SECONDS)
+
 @api.get("/invoices")
 async def list_invoices(student_id: Optional[str] = None, status: Optional[str] = None,
                         user: dict = Depends(get_current_user)):
@@ -981,9 +1174,7 @@ async def create_invoice(payload: InvoiceIn, user: dict = Depends(require_role("
     inv = await _build_invoice_doc(payload, user)
     res = await db.invoices.insert_one(inv)
     saved = serialize_doc({**inv, "_id": res.inserted_id})
-    if saved.get("parent_whatsapp"):
-        send_named_whatsapp_template(saved["parent_whatsapp"], "invoice_created",
-                                     [saved["invoice_no"], saved["student_name"], money_text(saved["amount"]), saved["due_date"]])
+    _send_invoice_created_notifications(saved)
     return saved
 
 @api.get("/invoices/{iid}")
@@ -1464,6 +1655,34 @@ async def test_notify(payload: TestNotifyIn, _: dict = Depends(require_role("dir
     return out
 
 PLAN_DAYS = {"monthly": 30, "quarterly": 90, "annual": 365}
+PLAN_LABELS = {"monthly": "Monthly", "quarterly": "Quarterly", "annual": "Annual"}
+PLAN_FEE_FIELDS = {"monthly": "monthly_fee", "quarterly": "quarterly_fee", "annual": "annual_fee"}
+
+async def _level_for_student(student: dict) -> Optional[dict]:
+    if not student.get("level_id"):
+        return None
+    try:
+        return await db.levels.find_one({"_id": oid(student["level_id"])})
+    except HTTPException:
+        return None
+
+async def _student_plan_config(student: dict, plan: Optional[str] = None,
+                               level: Optional[dict] = None) -> dict:
+    selected = (plan or student.get("payment_plan") or "monthly").strip().lower()
+    level = level if level is not None else await _level_for_student(student)
+    if selected == "custom":
+        return {
+            "plan": "custom",
+            "label": (level or {}).get("custom_plan_name") or "Custom",
+            "days": int((level or {}).get("custom_duration_days") or 0),
+            "fee": float((level or {}).get("custom_fee") or 0),
+        }
+    return {
+        "plan": selected if selected in PLAN_DAYS else "monthly",
+        "label": PLAN_LABELS.get(selected, "Monthly"),
+        "days": PLAN_DAYS.get(selected, PLAN_DAYS["monthly"]),
+        "fee": float((level or {}).get(PLAN_FEE_FIELDS.get(selected, "monthly_fee")) or 0),
+    }
 
 def _compute_sub_status(end_iso: Optional[str]) -> str:
     if not end_iso:
@@ -1482,10 +1701,13 @@ def _compute_sub_status(end_iso: Optional[str]) -> str:
 async def _extend_subscription(student_id: str, plan: str, ref_date: Optional[date] = None) -> dict:
     """Extend a student's subscription by the plan's day-count, anchored on the later of
     today and the existing end-date. Persists subscription_start/end/status on the student doc."""
-    days = PLAN_DAYS.get(plan or "monthly", 30)
     student = await db.students.find_one({"_id": oid(student_id)})
     if not student:
         return {}
+    config = await _student_plan_config(student, plan)
+    days = int(config.get("days") or 0)
+    if days <= 0:
+        raise HTTPException(400, f"{config.get('label') or 'Selected'} plan needs a duration greater than 0 days")
     today = ref_date or date.today()
     current_end_iso = student.get("subscription_end")
     try:
@@ -1502,10 +1724,10 @@ async def _extend_subscription(student_id: str, plan: str, ref_date: Optional[da
             "subscription_start": sub_start,
             "subscription_end": new_end_iso,
             "subscription_status": _compute_sub_status(new_end_iso),
-            "subscription_plan": plan or "monthly",
+            "subscription_plan": config["plan"],
         }},
     )
-    return {"subscription_start": sub_start, "subscription_end": new_end_iso}
+    return {"subscription_start": sub_start, "subscription_end": new_end_iso, "days": days, "plan": config["plan"]}
 
 # ---------------------------- Kiosk: Self check-in / check-out ----------------------------
 class KioskAction(BaseModel):
@@ -1602,10 +1824,13 @@ async def get_subscription(sid: str, user: dict = Depends(get_current_user)):
     if not s:
         raise HTTPException(404, "Student not found")
     end = s.get("subscription_end")
+    config = await _student_plan_config(s)
     return {
         "start": s.get("subscription_start"),
         "end": end,
-        "plan": s.get("subscription_plan") or s.get("payment_plan", "monthly"),
+        "plan": s.get("subscription_plan") or config["plan"],
+        "plan_label": config["label"],
+        "plan_duration_days": config["days"],
         "status": _compute_sub_status(end),
         "days_remaining": (datetime.fromisoformat(end).date() - date.today()).days if end else None,
     }
@@ -1789,6 +2014,9 @@ class MonthlyRunIn(BaseModel):
     include_pending: bool = True
     plans: Optional[List[str]] = None  # e.g. ["monthly"] — defaults to all
 
+class SubscriptionRenewalRunIn(BaseModel):
+    target_date: Optional[str] = None  # YYYY-MM-DD, defaults to tomorrow
+
 @api.post("/billing/monthly-run")
 async def monthly_billing_run(payload: MonthlyRunIn, user: dict = Depends(require_role("finance", "ops_manager"))):
     # Skip students who already have an invoice for this period
@@ -1816,13 +2044,15 @@ async def monthly_billing_run(payload: MonthlyRunIn, user: dict = Depends(requir
         if not lv:
             skipped.append({"student_id": sid_str, "reason": "level_missing"})
             continue
-        plan = s.get("payment_plan", "monthly")
-        fee_field = {"monthly": "monthly_fee", "quarterly": "quarterly_fee", "annual": "annual_fee"}[plan]
-        fee_amt = float(lv.get(fee_field, 0) or 0)
+        config = await _student_plan_config(s, level=lv)
+        fee_amt = float(config.get("fee") or 0)
         if fee_amt <= 0:
             skipped.append({"student_id": sid_str, "reason": "no_fee"})
             continue
-        items = [{"description": f"{lv['name']} - {plan} fee ({payload.period})", "amount": fee_amt}]
+        if config["plan"] == "custom" and int(config.get("days") or 0) <= 0:
+            skipped.append({"student_id": sid_str, "reason": "custom_plan_duration_missing"})
+            continue
+        items = [{"description": f"{lv['name']} - {config['label']} fee ({payload.period})", "amount": fee_amt}]
 
         # Carry-over: include all pending balances from previous periods
         if payload.include_pending:
@@ -1842,10 +2072,24 @@ async def monthly_billing_run(payload: MonthlyRunIn, user: dict = Depends(requir
             items=[InvoiceItem(**i) for i in items], notes="Auto-generated by monthly run",
         )
         inv = await _build_invoice_doc(inv_payload, user)
+        inv["payment_plan"] = config["plan"]
+        inv["plan_label"] = config["label"]
+        inv["plan_duration_days"] = config["days"]
         res = await db.invoices.insert_one(inv)
         created.append({"student_id": sid_str, "invoice_no": inv["invoice_no"], "amount": inv["amount"]})
 
     return {"created": created, "skipped": skipped, "total_created": len(created)}
+
+@api.post("/billing/subscription-renewal-run")
+async def subscription_renewal_run(payload: SubscriptionRenewalRunIn,
+                                   user: dict = Depends(require_role("finance", "ops_manager"))):
+    target = None
+    if payload.target_date:
+        try:
+            target = datetime.fromisoformat(payload.target_date).date()
+        except Exception:
+            raise HTTPException(400, "target_date must be a valid YYYY-MM-DD date")
+    return await create_subscription_renewal_invoices(target)
 
 # ---------------------------- Open Registration (public) ----------------------------
 class RegistrationIn(BaseModel):
@@ -1944,6 +2188,9 @@ async def confirm_registration(rid: str, payload: RegistrationConfirmIn,
     if student_doc.get("parent_whatsapp"):
         send_named_whatsapp_template(student_doc["parent_whatsapp"], "registration_confirmed",
                                      [student_doc["parent_name"], student_doc["full_name"], student_doc["student_code"]])
+        if student_doc.get("batch_id"):
+            saved_student = {**student_doc, "_id": res.inserted_id}
+            await send_batch_group_invite(saved_student, created_by=user["id"], reason="registration_confirmed")
     
     if student_doc.get("parent_email"):
         extra_ctx = await _student_email_context(student_doc)
@@ -1972,7 +2219,7 @@ class StudentImportRow(BaseModel):
 async def import_students(payload: StudentImportRow, user: dict = Depends(require_role("ops_manager", "front_desk"))):
     """Bulk import students. Expected fields per row:
     full_name, parent_name, parent_whatsapp, parent_email, dob, gender, address,
-    payment_plan (monthly|quarterly|annual), level_code, batch_name, enrollment_date.
+    payment_plan (monthly|quarterly|annual|custom), level_code, batch_name, enrollment_date.
     Missing optional fields default to empty/none."""
     levels = await db.levels.find().to_list(500)
     batches = await db.batches.find().to_list(500)
@@ -1992,7 +2239,7 @@ async def import_students(payload: StudentImportRow, user: dict = Depends(requir
             batch_id = batch_by_name.get((row.get("batch_name") or "").lower())
             email_val = (row.get("parent_email") or "").strip() or None
             plan = (row.get("payment_plan") or "monthly").strip().lower()
-            if plan not in ("monthly", "quarterly", "annual"):
+            if plan not in ("monthly", "quarterly", "annual", "custom"):
                 plan = "monthly"
             doc = {
                 "full_name": full_name,
@@ -2014,6 +2261,8 @@ async def import_students(payload: StudentImportRow, user: dict = Depends(requir
                 "created_by": user["id"],
             }
             res = await db.students.insert_one(doc)
+            if doc.get("parent_whatsapp") and doc.get("batch_id"):
+                await send_batch_group_invite({**doc, "_id": res.inserted_id}, created_by=user["id"], reason="student_imported")
             created.append({"id": str(res.inserted_id), "student_code": doc["student_code"], "full_name": full_name})
         except Exception as e:
             errors.append({"row": idx, "reason": str(e)})

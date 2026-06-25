@@ -13,6 +13,10 @@ import { SortableHead, applySort } from "@/components/SortableHead";
 const fmt = (n) => `₹${Number(n||0).toLocaleString("en-IN")}`;
 const today = () => new Date().toISOString().slice(0,10);
 const monthStr = () => new Date().toISOString().slice(0,7);
+const planLabel = (student, level) =>
+  student?.payment_plan === "custom" ? (level?.custom_plan_name || "Custom") :
+  student?.payment_plan === "quarterly" ? "Quarterly" :
+  student?.payment_plan === "annual" ? "Annual" : "Monthly";
 
 export default function Billing() {
   const [items, setItems] = useState([]);
@@ -51,10 +55,11 @@ export default function Billing() {
     if (s.level_id) {
       const lv = levels.find((l)=>l.id===s.level_id);
       if (lv) {
-        const amt = s.payment_plan === "quarterly" ? lv.quarterly_fee
+        const amt = s.payment_plan === "custom"    ? lv.custom_fee
+                  : s.payment_plan === "quarterly" ? lv.quarterly_fee
                   : s.payment_plan === "annual"    ? lv.annual_fee
                   : lv.monthly_fee;
-        newItems.push({ description: `${lv.name} - ${s.payment_plan} fee`, amount: Number(amt || 0) });
+        newItems.push({ description: `${lv.name} - ${planLabel(s, lv)} fee`, amount: Number(amt || 0) });
       }
     }
     // Auto-add outstanding balance from prior invoices
