@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { ChevronLeft, Pencil, Trash2, Link2, Share2, Copy, CalendarCheck, RefreshCw } from "lucide-react";
+import { ChevronLeft, Pencil, Trash2, Link2, Share2, Copy, CalendarCheck, RefreshCw, Award, Upload } from "lucide-react";
 import { toast } from "sonner";
 
 const fmtINR = (n) => `₹${Number(n||0).toLocaleString("en-IN")}`;
@@ -37,6 +37,9 @@ export default function StudentDetail() {
   const [subscription, setSubscription] = useState(null);
   const [portalUrl, setPortalUrl] = useState("");
   const [linking, setLinking] = useState(false);
+  const [promoteOpen, setPromoteOpen] = useState(false);
+  const [promoteForm, setPromoteForm] = useState({ level_id: "", batch_id: "", scoresheet: null });
+  const [promoting, setPromoting] = useState(false);
 
   const reload = () => {
     api.get(`/students/${id}`).then((r) => setS(r.data));
@@ -54,6 +57,10 @@ export default function StudentDetail() {
   }, [id]);
 
   const startEdit = () => { setForm(pickForm(s)); setEditOpen(true); };
+  const startPromote = () => {
+    setPromoteForm({ level_id: s.level_id || "", batch_id: s.batch_id || "", scoresheet: null });
+    setPromoteOpen(true);
+  };
 
   const saveEdit = async (e) => {
     e.preventDefault();
@@ -64,6 +71,30 @@ export default function StudentDetail() {
       toast.success("Student updated");
       setEditOpen(false); reload();
     } catch (ex) { toast.error(formatApiError(ex.response?.data?.detail)); }
+  };
+
+  const submitPromotion = async (e) => {
+    e.preventDefault();
+    if (!promoteForm.level_id) {
+      toast.error("Select the new level");
+      return;
+    }
+    if (!promoteForm.scoresheet) {
+      toast.error("Attach the scoresheet");
+      return;
+    }
+    setPromoting(true);
+    try {
+      const data = new FormData();
+      data.append("level_id", promoteForm.level_id);
+      if (promoteForm.batch_id) data.append("batch_id", promoteForm.batch_id);
+      data.append("scoresheet", promoteForm.scoresheet);
+      await api.post(`/students/${id}/promote`, data);
+      toast.success("Student promoted and parent email sent");
+      setPromoteOpen(false);
+      reload();
+    } catch (ex) { toast.error(formatApiError(ex.response?.data?.detail)); }
+    finally { setPromoting(false); }
   };
 
   const del = async () => {
@@ -126,6 +157,9 @@ export default function StudentDetail() {
         subtitle={`Parent: ${s.parent_name} · ${s.parent_whatsapp}`}
         actions={
           <>
+            <button className="ck-btn-primary flex items-center gap-2" onClick={startPromote} data-testid="student-promote-btn">
+              <Award size={14}/> Promote
+            </button>
             <button className="ck-btn-ghost flex items-center gap-2" onClick={startEdit} data-testid="student-edit-btn">
               <Pencil size={14}/> Edit
             </button>
@@ -343,6 +377,57 @@ export default function StudentDetail() {
               </div>
             </form>
           )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={promoteOpen} onOpenChange={(o)=>{ setPromoteOpen(o); if (!o) setPromoteForm({ level_id: "", batch_id: "", scoresheet: null }); }}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader><DialogTitle>Promote student</DialogTitle></DialogHeader>
+          <form onSubmit={submitPromotion} className="space-y-4" data-testid="student-promote-form">
+            <DField label="New Level" required>
+              <Select value={promoteForm.level_id || ""} onValueChange={(v)=>setPromoteForm({...promoteForm, level_id: v})}>
+                <SelectTrigger data-testid="promote-level"><SelectValue placeholder="Select level" /></SelectTrigger>
+                <SelectContent>
+                  {levels.map((l)=>(<SelectItem key={l.id} value={l.id}>{l.name}</SelectItem>))}
+                </SelectContent>
+              </Select>
+            </DField>
+            <DField label="New Batch">
+              <Select value={promoteForm.batch_id || "_none"} onValueChange={(v)=>setPromoteForm({...promoteForm, batch_id: v === "_none" ? "" : v})}>
+                <SelectTrigger data-testid="promote-batch"><SelectValue placeholder="Select batch" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="_none">— None —</SelectItem>
+                  {batches.map((b)=>(<SelectItem key={b.id} value={b.id}>{b.name}</SelectItem>))}
+                </SelectContent>
+              </Select>
+            </DField>
+            <DField label="Scoresheet" required>
+              <label className="ck-input rounded-lg px-3 py-3 flex items-center justify-between gap-3 cursor-pointer">
+                <span className="text-sm truncate text-[var(--ck-muted)]">
+                  {promoteForm.scoresheet?.name || "Attach PDF, image, or document"}
+                </span>
+                <span className="ck-btn-ghost text-xs inline-flex items-center gap-1 pointer-events-none">
+                  <Upload size={12}/> Choose
+                </span>
+                <input
+                  type="file"
+                  className="hidden"
+                  data-testid="promote-scoresheet"
+                  onChange={(e)=>setPromoteForm({...promoteForm, scoresheet: e.target.files?.[0] || null})}
+                  required
+                />
+              </label>
+            </DField>
+            <div className="text-xs text-[var(--ck-muted)] leading-relaxed">
+              The parent will receive a promotion email with this scoresheet and a branded promotion certificate.
+            </div>
+            <div className="flex justify-end gap-2">
+              <button type="button" className="ck-btn-ghost" onClick={()=>setPromoteOpen(false)}>Cancel</button>
+              <button type="submit" className="ck-btn-primary flex items-center gap-2" disabled={promoting} data-testid="promote-submit">
+                <Award size={14}/> {promoting ? "Promoting…" : "Promote & email"}
+              </button>
+            </div>
+          </form>
         </DialogContent>
       </Dialog>
     </>

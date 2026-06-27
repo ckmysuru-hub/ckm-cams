@@ -19,13 +19,14 @@ import jwt
 from bson import ObjectId
 from bson.errors import InvalidId
 from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, Query
+from fastapi import UploadFile, File, Form
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, EmailStr, ConfigDict
 
-from reportlab.lib.pagesizes import A4
+from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import mm
@@ -38,6 +39,8 @@ import requests
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
 from email.utils import formataddr
 from urllib.parse import quote
 from email_templates import render_email_template
@@ -586,10 +589,10 @@ def send_payment_receipt_whatsapp(to_phone: str, invoice: dict, receipt: dict) -
     )
 
 
-def send_template_email(to_email: str, template_key: str, context: dict) -> dict:
+def send_template_email(to_email: str, template_key: str, context: dict, attachments: Optional[List[dict]] = None) -> dict:
     context = {"academy_name": os.environ.get("ACADEMY_NAME", "Chess Klub Mysuru"), **context}
     subject, html = render_email_template(template_key, context)
-    return send_email(to_email, subject, html)
+    return send_email(to_email, subject, html, attachments=attachments)
 
 
 async def existing_attendance_for_student(student_id: str, session_date: str, batch_id: Optional[str] = None) -> Optional[dict]:
@@ -622,7 +625,7 @@ async def mark_student_present_from_kiosk(student: dict, session_date: str, chec
     )
 
 
-def send_email(to_email: str, subject: str, html: str) -> dict:
+def send_email(to_email: str, subject: str, html: str, attachments: Optional[List[dict]] = None) -> dict:
     """Send an email via Gmail SMTP using an App Password.
     Falls back to log-only mode when credentials are missing."""
     if not to_email:
@@ -631,17 +634,31 @@ def send_email(to_email: str, subject: str, html: str) -> dict:
     gmail_pass = os.environ.get("GMAIL_APP_PASSWORD")
     if not (gmail_user and gmail_pass):
         logger.debug(f"[EMAIL MOCK] to={to_email} subject_set={bool(subject)}")
-        return {"sent": False, "mode": "log", "to": to_email}
+        return {"sent": False, "mode": "log", "to": to_email, "attachments": len(attachments or [])}
     try:
-        msg = MIMEMultipart("alternative")
+        attachments = attachments or []
+        msg = MIMEMultipart("mixed") if attachments else MIMEMultipart("alternative")
         msg["Subject"] = subject
         msg["From"] = formataddr((os.environ.get("ACADEMY_NAME", "Chess Klub Mysuru"), gmail_user))
         msg["To"] = to_email
-        msg.attach(MIMEText(html, "html"))
+        if attachments:
+            alt = MIMEMultipart("alternative")
+            alt.attach(MIMEText(html, "html"))
+            msg.attach(alt)
+            for att in attachments:
+                content_type = att.get("content_type") or "application/octet-stream"
+                maintype, subtype = content_type.split("/", 1) if "/" in content_type else ("application", "octet-stream")
+                part = MIMEBase(maintype, subtype)
+                part.set_payload(att.get("data") or b"")
+                encoders.encode_base64(part)
+                part.add_header("Content-Disposition", "attachment", filename=att.get("filename") or "attachment")
+                msg.attach(part)
+        else:
+            msg.attach(MIMEText(html, "html"))
         with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as server:
             server.login(gmail_user, gmail_pass.replace(" ", ""))
             server.sendmail(gmail_user, [to_email], msg.as_string())
-        return {"sent": True, "mode": "gmail_smtp", "to": to_email}
+        return {"sent": True, "mode": "gmail_smtp", "to": to_email, "attachments": len(attachments)}
     except Exception as e:
         logger.warning(f"Gmail SMTP send failed: {e}")
         return {"sent": False, "mode": "error", "error": str(e)}
@@ -952,6 +969,116 @@ async def update_student(sid: str, payload: StudentIn, user: dict = Depends(requ
     if doc.get("batch_id") and doc.get("batch_id") != existing.get("batch_id"):
         await send_batch_group_invite(updated, created_by=user["id"], reason="batch_assigned")
     return serialize_doc(updated)
+
+@api.post("/students/{sid}/promote")
+async def promote_student(
+    sid: str,
+    level_id: str = Form(...),
+    batch_id: Optional[str] = Form(None),
+    scoresheet: UploadFile = File(...),
+    user: dict = Depends(require_role("ops_manager", "front_desk", "coach")),
+):
+    student = await db.students.find_one({"_id": oid(sid)})
+    if not student:
+        raise HTTPException(404, "Student not found")
+    if not student.get("parent_email"):
+        raise HTTPException(400, "Parent email is required before promoting a student")
+    new_level = await db.levels.find_one({"_id": oid(level_id, "level id")})
+    if not new_level:
+        raise HTTPException(404, "Level not found")
+    new_batch = None
+    if batch_id:
+        new_batch = await db.batches.find_one({"_id": oid(batch_id, "batch id")})
+        if not new_batch:
+            raise HTTPException(404, "Batch not found")
+
+    old_level = await db.levels.find_one({"_id": oid(student["level_id"], "level id")}) if student.get("level_id") else None
+    old_batch = await db.batches.find_one({"_id": oid(student["batch_id"], "batch id")}) if student.get("batch_id") else None
+
+    scoresheet_bytes = await scoresheet.read()
+    if not scoresheet_bytes:
+        raise HTTPException(400, "Scoresheet attachment is required")
+    if len(scoresheet_bytes) > 15 * 1024 * 1024:
+        raise HTTPException(400, "Scoresheet attachment must be 15 MB or smaller")
+
+    promoted_at = date.today().isoformat()
+    certificate_pdf = _build_promotion_certificate_pdf(
+        student,
+        (old_level or {}).get("name", ""),
+        new_level.get("name", ""),
+        (new_batch or {}).get("name", ""),
+        promoted_at,
+    )
+    certificate_filename = f"{_safe_filename(student.get('student_code') or student.get('full_name'), 'student')}_promotion_certificate.pdf"
+    scoresheet_filename = _safe_filename(scoresheet.filename or "scoresheet")
+
+    email_result = None
+    if student.get("parent_email"):
+        email_result = send_template_email(
+            student["parent_email"],
+            "student_promoted",
+            {
+                "parent_name": student.get("parent_name", "Parent"),
+                "student_name": student.get("full_name", ""),
+                "old_level": (old_level or {}).get("name", "Previous level"),
+                "new_level": new_level.get("name", ""),
+                "new_batch": (new_batch or {}).get("name", "To be assigned"),
+            },
+            attachments=[
+                {
+                    "filename": scoresheet_filename,
+                    "content_type": scoresheet.content_type or "application/octet-stream",
+                    "data": scoresheet_bytes,
+                },
+                {
+                    "filename": certificate_filename,
+                    "content_type": "application/pdf",
+                    "data": certificate_pdf,
+                },
+            ],
+        )
+
+    await db.students.update_one(
+        {"_id": oid(sid)},
+        {"$set": {
+            "level_id": level_id,
+            "batch_id": batch_id or None,
+            "last_promoted_at": iso(now_utc()),
+            "last_promoted_from_level_id": student.get("level_id"),
+            "last_promoted_to_level_id": level_id,
+        }},
+    )
+    updated = await db.students.find_one({"_id": oid(sid)})
+    if batch_id and batch_id != student.get("batch_id"):
+        await send_batch_group_invite(updated, new_batch, user["id"], "student_promoted")
+
+    promotion_doc = {
+        "student_id": sid,
+        "student_code": student.get("student_code"),
+        "student_name": student.get("full_name"),
+        "old_level_id": student.get("level_id"),
+        "old_level_name": (old_level or {}).get("name", ""),
+        "new_level_id": level_id,
+        "new_level_name": new_level.get("name", ""),
+        "old_batch_id": student.get("batch_id"),
+        "old_batch_name": (old_batch or {}).get("name", ""),
+        "new_batch_id": batch_id or None,
+        "new_batch_name": (new_batch or {}).get("name", ""),
+        "scoresheet_filename": scoresheet_filename,
+        "certificate_filename": certificate_filename,
+        "parent_email": student.get("parent_email"),
+        "email": email_result,
+        "promoted_at": iso(now_utc()),
+        "promoted_by": user["id"],
+    }
+    res = await db.student_promotions.insert_one(promotion_doc)
+    return {
+        "ok": True,
+        "promotion_id": str(res.inserted_id),
+        "student": serialize_doc(updated),
+        "email": email_result,
+        "certificate_filename": certificate_filename,
+    }
 
 @api.delete("/students/{sid}")
 async def delete_student(sid: str, _: dict = Depends(require_role("ops_manager"))):
@@ -1461,6 +1588,96 @@ def _build_pdf(title: str, doc_no: str, doc_date: str, student_lines: List[str],
         doc.build(elements, onFirstPage=_paid_seal, onLaterPages=_paid_seal)
     else:
         doc.build(elements)
+    buf.seek(0)
+    return buf.read()
+
+def _safe_filename(value: str, fallback: str = "file") -> str:
+    cleaned = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in (value or fallback))
+    return cleaned.strip("._") or fallback
+
+def _build_promotion_certificate_pdf(student: dict, old_level: str, new_level: str,
+                                     new_batch: str, promoted_at: str) -> bytes:
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=landscape(A4),
+        leftMargin=18 * mm,
+        rightMargin=18 * mm,
+        topMargin=16 * mm,
+        bottomMargin=16 * mm,
+    )
+    styles = getSampleStyleSheet()
+    elements = []
+    logo_bytes = fetch_logo_bytes()
+    header_left = ""
+    if logo_bytes:
+        try:
+            header_left = Image(io.BytesIO(logo_bytes), width=24 * mm, height=24 * mm)
+        except Exception:
+            header_left = ""
+    header_right = Paragraph(
+        f"<para align='right'><b>{os.environ.get('ACADEMY_NAME', 'Chess Klub Mysuru')}</b><br/>"
+        f"{os.environ.get('ACADEMY_ADDRESS', '')}<br/>{os.environ.get('ACADEMY_EMAIL', '')}</para>",
+        ParagraphStyle("cert_academy", fontSize=10, leading=13, textColor=GRAY),
+    )
+    htable = Table([[header_left, header_right]], colWidths=[55 * mm, 205 * mm])
+    htable.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE")]))
+    elements.append(htable)
+    elements.append(Spacer(1, 10))
+    band = Table([[" "]], colWidths=[260 * mm], rowHeights=[4])
+    band.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), ORANGE)]))
+    elements.append(band)
+    elements.append(Spacer(1, 18))
+    elements.append(Paragraph(
+        "<para align='center'><b>PROMOTION CERTIFICATE</b></para>",
+        ParagraphStyle("cert_title", fontSize=28, leading=34, textColor=BLACK),
+    ))
+    elements.append(Spacer(1, 12))
+    elements.append(Paragraph(
+        "<para align='center'>This is proudly presented to</para>",
+        ParagraphStyle("cert_intro", fontSize=13, leading=18, textColor=GRAY),
+    ))
+    elements.append(Spacer(1, 8))
+    elements.append(Paragraph(
+        f"<para align='center'><b>{student.get('full_name', '')}</b></para>",
+        ParagraphStyle("cert_name", fontSize=32, leading=38, textColor=ORANGE),
+    ))
+    elements.append(Spacer(1, 10))
+    elements.append(Paragraph(
+        f"<para align='center'>for being promoted from <b>{old_level or 'Previous level'}</b> "
+        f"to <b>{new_level}</b>.</para>",
+        ParagraphStyle("cert_body", fontSize=15, leading=22, textColor=BLACK),
+    ))
+    if new_batch:
+        elements.append(Spacer(1, 4))
+        elements.append(Paragraph(
+            f"<para align='center'>New batch: <b>{new_batch}</b></para>",
+            ParagraphStyle("cert_batch", fontSize=12, leading=18, textColor=GRAY),
+        ))
+    elements.append(Spacer(1, 18))
+    meta = Table(
+        [[
+            Paragraph(f"<b>Student Code</b><br/>{student.get('student_code', '')}", styles["Normal"]),
+            Paragraph(f"<b>Date</b><br/>{promoted_at}", styles["Normal"]),
+            Paragraph("<b>Authorized By</b><br/>Chess Klub Mysuru", styles["Normal"]),
+        ]],
+        colWidths=[80 * mm, 80 * mm, 80 * mm],
+    )
+    meta.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 0.5, LIGHT),
+        ("INNERGRID", (0, 0), (-1, -1), 0.5, LIGHT),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 10),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+    ]))
+    elements.append(meta)
+    elements.append(Spacer(1, 12))
+    elements.append(Paragraph(
+        "<para align='center'>Keep learning. Keep calculating. Keep enjoying the game.</para>",
+        ParagraphStyle("cert_footer", fontSize=10, leading=14, textColor=GRAY),
+    ))
+    doc.build(elements)
     buf.seek(0)
     return buf.read()
 

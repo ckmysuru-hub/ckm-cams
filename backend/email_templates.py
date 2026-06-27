@@ -189,6 +189,19 @@ EMAIL_TEMPLATES = {
             <p style="color:#777">Sent from Chess Klub Mysuru CAMS.</p>
         """,
     },
+    "student_promoted": {
+        "subject": "Promotion update for {student_name} - {academy_name}",
+        "html": """
+            <p>Dear {parent_name},</p>
+            <p>Congratulations! <b>{student_name}</b> has been promoted from <b>{old_level}</b> to <b>{new_level}</b>.</p>
+            <p>New batch: <b>{new_batch}</b></p>
+            <p>Please find attached the scoresheet and promotion certificate.</p>
+            <p>
+                Warm Regards,<br>
+                <strong>{academy_name}</strong>
+            </p>
+        """,
+    },
 }
 
 
