@@ -287,6 +287,8 @@ class AttendanceSessionIn(BaseModel):
     batch_id: str
     session_date: str  # YYYY-MM-DD
     marks: dict  # {student_id: "P"|"A"|"L"|"LT"|"H"}
+    coach_id: Optional[str] = None
+    topic: Optional[str] = ""
 
 class InvoiceItem(BaseModel):
     description: str
@@ -1088,6 +1090,12 @@ async def delete_student(sid: str, _: dict = Depends(require_role("ops_manager")
 # ---------------------------- Attendance ----------------------------
 @api.post("/attendance")
 async def save_attendance(payload: AttendanceSessionIn, user: dict = Depends(require_role("coach", "ops_manager", "front_desk"))):
+    coach_name = ""
+    if payload.coach_id:
+        coach = await db.users.find_one({"_id": oid(payload.coach_id, "coach id")})
+        if not coach:
+            raise HTTPException(404, "Coach not found")
+        coach_name = coach.get("name", "")
     duplicate_students = []
     for sid, mark in payload.marks.items():
         if mark not in ("P", "A", "L", "LT", "H"):
@@ -1101,6 +1109,9 @@ async def save_attendance(payload: AttendanceSessionIn, user: dict = Depends(req
         "batch_id": payload.batch_id,
         "session_date": payload.session_date,
         "marks": payload.marks,
+        "coach_id": payload.coach_id or None,
+        "coach_name": coach_name,
+        "topic": (payload.topic or "").strip(),
         "marked_by": user["id"],
         "updated_at": iso(now_utc()),
     }
@@ -1137,13 +1148,15 @@ async def export_attendance(batch_id: Optional[str] = None, start_date: Optional
     student_map = {str(s["_id"]): s for s in students}
     out = io.StringIO()
     writer = csv.writer(out)
-    writer.writerow(["session_date", "batch", "student_code", "student_name", "status", "marked_via"])
+    writer.writerow(["session_date", "batch", "coach", "topic", "student_code", "student_name", "status", "marked_via"])
     for session in sessions:
         for sid, status in sorted(session.get("marks", {}).items(), key=lambda kv: (student_map.get(kv[0], {}).get("full_name", ""), kv[0])):
             student = student_map.get(sid, {})
             writer.writerow([
                 session.get("session_date", ""),
                 batch_map.get(session.get("batch_id"), session.get("batch_id", "")),
+                session.get("coach_name", ""),
+                session.get("topic", ""),
                 student.get("student_code", ""),
                 student.get("full_name", sid),
                 status,
@@ -1166,7 +1179,13 @@ async def student_attendance(sid: str, user: dict = Depends(get_current_user)):
         st = s.get("marks", {}).get(sid)
         if st:
             counts[st] = counts.get(st, 0) + 1
-            history.append({"date": s["session_date"], "status": st})
+            history.append({
+                "date": s["session_date"],
+                "status": st,
+                "topic": s.get("topic", ""),
+                "coach_id": s.get("coach_id"),
+                "coach_name": s.get("coach_name", ""),
+            })
     total_sessions = sum(counts[k] for k in ["P", "A", "L", "LT"])
     pct = round((counts["P"] + counts["LT"]) / total_sessions * 100, 1) if total_sessions else 0
     return {"counts": counts, "history": history, "percentage": pct}
@@ -2124,14 +2143,23 @@ async def portal_data(token: str):
     sid_str = str(s["_id"])
     # attendance
     batch_id = s.get("batch_id")
-    sessions = await db.attendance.find({"batch_id": batch_id}, {"marks": 1, "session_date": 1}).sort("session_date", -1).limit(60).to_list(60) if batch_id else []
+    sessions = await db.attendance.find(
+        {"batch_id": batch_id},
+        {"marks": 1, "session_date": 1, "topic": 1, "coach_id": 1, "coach_name": 1},
+    ).sort("session_date", -1).limit(60).to_list(60) if batch_id else []
     counts = {"P": 0, "A": 0, "L": 0, "LT": 0, "H": 0}
     history = []
     for sess in sessions:
         st = (sess.get("marks") or {}).get(sid_str)
         if st:
             counts[st] = counts.get(st, 0) + 1
-            history.append({"date": sess["session_date"], "status": st})
+            history.append({
+                "date": sess["session_date"],
+                "status": st,
+                "topic": sess.get("topic", ""),
+                "coach_id": sess.get("coach_id"),
+                "coach_name": sess.get("coach_name", ""),
+            })
     total = sum(counts[k] for k in ["P", "A", "L", "LT"])
     pct = round((counts["P"] + counts["LT"]) / total * 100, 1) if total else 0
     # invoices + receipts

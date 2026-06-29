@@ -19,16 +19,26 @@ export default function Attendance() {
   const [batchId, setBatchId] = useState("");
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
   const [students, setStudents] = useState([]);
+  const [coaches, setCoaches] = useState([]);
+  const [coachId, setCoachId] = useState("");
+  const [topic, setTopic] = useState("");
   const [marks, setMarks] = useState({});
   const [saving, setSaving] = useState(false);
 
-  useEffect(() => { api.get("/batches").then((r) => setBatches(r.data)); }, []);
+  useEffect(() => {
+    api.get("/batches").then((r) => setBatches(r.data));
+    api.get("/users").then((r) => setCoaches(r.data.filter((u) => ["coach","director","ops_manager"].includes(u.role)))).catch(()=>{});
+  }, []);
 
   useEffect(() => {
     if (!batchId) return;
     api.get(`/batches/${batchId}/students`).then((r) => setStudents(r.data));
     api.get("/attendance", { params: { batch_id: batchId, session_date: date } })
-      .then((r) => setMarks(r.data?.marks || {}));
+      .then((r) => {
+        setMarks(r.data?.marks || {});
+        setCoachId(r.data?.coach_id || "");
+        setTopic(r.data?.topic || "");
+      });
   }, [batchId, date]);
 
   const setMark = (sid, v) => setMarks((m) => ({ ...m, [sid]: v }));
@@ -39,7 +49,7 @@ export default function Attendance() {
   const save = async () => {
     setSaving(true);
     try {
-      await api.post("/attendance", { batch_id: batchId, session_date: date, marks });
+      await api.post("/attendance", { batch_id: batchId, session_date: date, marks, coach_id: coachId || null, topic });
       toast.success("Attendance saved");
     } catch (ex) { toast.error(formatApiError(ex.response?.data?.detail)); }
     finally { setSaving(false); }
@@ -73,7 +83,7 @@ export default function Attendance() {
         subtitle="Tap to mark. Auto-saves the session. Late counts toward attendance percentage."
       />
 
-      <div className="ck-card-elevated p-4 mb-4 grid md:grid-cols-3 gap-3 items-end">
+      <div className="ck-card-elevated p-4 mb-4 grid md:grid-cols-4 gap-3 items-end">
         <div>
           <div className="text-xs uppercase tracking-wider font-semibold text-[var(--ck-muted)] mb-1">Batch</div>
           <Select value={batchId} onValueChange={setBatchId}>
@@ -87,7 +97,21 @@ export default function Attendance() {
           <div className="text-xs uppercase tracking-wider font-semibold text-[var(--ck-muted)] mb-1">Session Date</div>
           <Input type="date" data-testid="att-date" value={date} onChange={(e)=>setDate(e.target.value)} />
         </div>
-        <div className="flex flex-col sm:flex-row gap-2 justify-end">
+        <div>
+          <div className="text-xs uppercase tracking-wider font-semibold text-[var(--ck-muted)] mb-1">Coach</div>
+          <Select value={coachId || "_none"} onValueChange={(v)=>setCoachId(v === "_none" ? "" : v)}>
+            <SelectTrigger data-testid="att-coach"><SelectValue placeholder="Select coach" /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="_none">— Not set —</SelectItem>
+              {coaches.map((c)=>(<SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div>
+          <div className="text-xs uppercase tracking-wider font-semibold text-[var(--ck-muted)] mb-1">Topic Covered</div>
+          <Input data-testid="att-topic" value={topic} onChange={(e)=>setTopic(e.target.value)} placeholder="e.g. Fork tactics" />
+        </div>
+        <div className="md:col-span-4 flex flex-col sm:flex-row gap-2 justify-end">
           <button className="ck-btn-ghost" onClick={()=>setAll("P")} disabled={!students.length} data-testid="mark-all-present">Mark all Present</button>
           <button className="ck-btn-ghost flex items-center gap-2" onClick={exportCsv} data-testid="att-export">
             <Download size={14}/> Export

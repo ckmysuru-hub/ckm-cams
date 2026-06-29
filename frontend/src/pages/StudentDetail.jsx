@@ -176,6 +176,31 @@ export default function StudentDetail() {
         <Stat label="Pending" value={fmtINR(inv.reduce((a,b)=>a+b.balance,0))} hint="balance outstanding" accent />
       </div>
 
+      <div className="ck-card-elevated p-5 mb-6" data-testid="attendance-history-card">
+        <div className="text-xs uppercase tracking-wider font-semibold text-[var(--ck-muted)] mb-3">Attendance details</div>
+        {att?.history?.length ? (
+          <div className="divide-y divide-[var(--ck-line)]">
+            {att.history.slice(0, 12).map((row)=>(
+              <div key={`${row.date}-${row.status}`} className="py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                <div>
+                  <div className="font-medium text-sm">{row.date}</div>
+                  <div className="text-xs text-[var(--ck-muted)]">
+                    {row.topic || "Topic not recorded"}{row.coach_name ? ` · ${row.coach_name}` : ""}
+                  </div>
+                </div>
+                <span className={`ck-pill ${
+                  row.status === "P" ? "ck-pill-green" :
+                  row.status === "A" ? "ck-pill-red" :
+                  row.status === "LT" ? "ck-pill-orange" : "ck-pill-black"
+                }`}>{row.status}</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="text-sm text-[var(--ck-muted)]">No attendance history yet.</div>
+        )}
+      </div>
+
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
         <div className="ck-card-elevated p-5" data-testid="subscription-card">
           <div className="flex items-center justify-between mb-3">
