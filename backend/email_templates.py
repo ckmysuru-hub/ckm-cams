@@ -196,6 +196,27 @@ EMAIL_TEMPLATES = {
             <p>Congratulations! <b>{student_name}</b> has been promoted from <b>{old_level}</b> to <b>{new_level}</b>.</p>
             <p>New batch: <b>{new_batch}</b></p>
             <p>Please find attached the scoresheet and promotion certificate.</p>
+            
+             <p>Below are the new class details for {student_name}!</p>
+
+    <table>
+        <tr>
+            <td><strong>New Batch:</strong></td>
+            <td>{new_batch}</td>
+        </tr>
+        <tr>
+            <td><strong>Batch Timing:</strong></td>
+            <td>{batch_timing}</td>
+        </tr>
+        <tr>
+            <td><strong>Coach Name:</strong></td>
+            <td>{coach_name}</td>
+        </tr>
+        <tr>
+            <td><strong>Study Material:</strong></td>
+            <td><li><a href="{level_url}"> {new_level} Study Material</a></li></td>
+        </tr>
+    </table>
             <p>
                 Warm Regards,<br>
                 <strong>{academy_name}</strong>

@@ -1013,9 +1013,10 @@ async def promote_student(
     )
     certificate_filename = f"{_safe_filename(student.get('student_code') or student.get('full_name'), 'student')}_promotion_certificate.pdf"
     scoresheet_filename = _safe_filename(scoresheet.filename or "scoresheet")
-
+    
     email_result = None
     if student.get("parent_email"):
+        extra_ctx = await _student_email_context(student)
         email_result = send_template_email(
             student["parent_email"],
             "student_promoted",
@@ -1025,6 +1026,7 @@ async def promote_student(
                 "old_level": (old_level or {}).get("name", "Previous level"),
                 "new_level": new_level.get("name", ""),
                 "new_batch": (new_batch or {}).get("name", "To be assigned"),
+                **extra_ctx
             },
             attachments=[
                 {
@@ -1614,7 +1616,7 @@ def _safe_filename(value: str, fallback: str = "file") -> str:
     cleaned = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in (value or fallback))
     return cleaned.strip("._") or fallback
 
-def _build_promotion_certificate_pdf(student: dict, old_level: str, new_level: str,
+def _build_promotion_certificate_pdf_old(student: dict, old_level: str, new_level: str,
                                      new_batch: str, promoted_at: str) -> bytes:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -1648,13 +1650,13 @@ def _build_promotion_certificate_pdf(student: dict, old_level: str, new_level: s
     elements.append(band)
     elements.append(Spacer(1, 18))
     elements.append(Paragraph(
-        "<para align='center'><b>PROMOTION CERTIFICATE</b></para>",
+        "<para align='center'><b>CERTIFICATE OF COMPLETION</b></para>",
         ParagraphStyle("cert_title", fontSize=28, leading=34, textColor=BLACK),
     ))
     elements.append(Spacer(1, 12))
     elements.append(Paragraph(
-        "<para align='center'>This is proudly presented to</para>",
-        ParagraphStyle("cert_intro", fontSize=13, leading=18, textColor=GRAY),
+        "<para align='center'>This certificate is proudly presented to</para>",
+        ParagraphStyle("cert_intro", fontSize=15, leading=18, textColor=BLACK),
     ))
     elements.append(Spacer(1, 8))
     elements.append(Paragraph(
@@ -1663,15 +1665,15 @@ def _build_promotion_certificate_pdf(student: dict, old_level: str, new_level: s
     ))
     elements.append(Spacer(1, 10))
     elements.append(Paragraph(
-        f"<para align='center'>for being promoted from <b>{old_level or 'Previous level'}</b> "
-        f"to <b>{new_level}</b>.</para>",
+        f"<para align='center'>For successfully completing <b>{old_level or 'Previous level'} course</b> "
+        f" with CHESS KLUB MYSURU on <b> {promoted_at} </b>.</para>",
         ParagraphStyle("cert_body", fontSize=15, leading=22, textColor=BLACK),
     ))
     if new_batch:
         elements.append(Spacer(1, 4))
         elements.append(Paragraph(
-            f"<para align='center'>New batch: <b>{new_batch}</b></para>",
-            ParagraphStyle("cert_batch", fontSize=12, leading=18, textColor=GRAY),
+            f"<para align='center'> <b>Congratulations! Keep up the good work!</b></para>",
+            ParagraphStyle("cert_batch", fontSize=14, leading=18, textColor=GRAY),
         ))
     elements.append(Spacer(1, 18))
     meta = Table(
@@ -1696,6 +1698,118 @@ def _build_promotion_certificate_pdf(student: dict, old_level: str, new_level: s
         "<para align='center'>Keep learning. Keep calculating. Keep enjoying the game.</para>",
         ParagraphStyle("cert_footer", fontSize=10, leading=14, textColor=GRAY),
     ))
+    doc.build(elements)
+    buf.seek(0)
+    return buf.read()
+def _build_promotion_certificate_pdf(student: dict, old_level: str, new_level: str,
+                                     new_batch: str, promoted_at: str) -> bytes:
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=landscape(A4),
+        leftMargin=18 * mm,
+        rightMargin=18 * mm,
+        topMargin=16 * mm,
+        bottomMargin=16 * mm,
+    )
+    styles = getSampleStyleSheet()
+    elements = []
+    
+    # Header: Motto on the Left, Logo/Name on the Right
+    header_left = Paragraph(
+        "<para align='left'><b>Learn Chess.<br/>Learn Life Lessons.</b></para>",
+        ParagraphStyle("motto", fontSize=12, leading=15, textColor=GRAY)
+    )
+    
+    logo_bytes = fetch_logo_bytes() # Assuming this is defined elsewhere in your code
+    if logo_bytes:
+        try:
+            header_right = Image(io.BytesIO(logo_bytes), width=24 * mm, height=24 * mm)
+        except Exception:
+            header_right = Paragraph("<para align='right'><b>CHESS KLUB</b></para>", styles["Normal"])
+    else:
+         header_right = Paragraph("<para align='right'><b>CHESS KLUB</b></para>", ParagraphStyle("ck", fontSize=14, textColor=GRAY))
+
+    htable = Table([[header_left, header_right]], colWidths=[130 * mm, 130 * mm])
+    htable.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("ALIGN", (1, 0), (1, 0), "RIGHT")
+    ]))
+    elements.append(htable)
+    elements.append(Spacer(1, 20))
+
+    # Certificate Title
+    band = Table([[" "]], colWidths=[260 * mm], rowHeights=[4])
+    band.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), ORANGE)]))
+    elements.append(band)
+    elements.append(Spacer(1, 18))
+    elements.append(Paragraph(
+        "<para align='center'><b>CERTIFICATE OF COMPLETION</b></para>",
+        ParagraphStyle("cert_title", fontSize=28, leading=34, textColor=BLACK),
+    ))
+    elements.append(Spacer(1, 12))
+
+    # Introductory Text
+    elements.append(Paragraph(
+        "<para align='center'>This Certificate is awarded to</para>",
+        ParagraphStyle("cert_intro", fontSize=15, leading=18, textColor=BLACK),
+    ))
+    elements.append(Spacer(1, 10))
+
+    # Student Name
+    elements.append(Paragraph(
+        f"<para align='center'><b>{student.get('full_name', '')}</b></para>",
+        ParagraphStyle("cert_name", fontSize=32, leading=38, textColor=ORANGE),
+    ))
+    elements.append(Spacer(1, 15))
+
+    # Body Description 
+    elements.append(Paragraph(
+        f"<para align='center'>For successfully completing <b>{old_level or 'Beginner 1'} course</b><br/> "
+        f"with CHESS KLUB on <b>{promoted_at}</b></para>",
+        ParagraphStyle("cert_body", fontSize=15, leading=22, textColor=BLACK),
+    ))
+    elements.append(Spacer(1, 10))
+
+    # Encouragement text
+    elements.append(Paragraph(
+        f"<para align='center'>Congratulations! Keep up the good work.</para>",
+        ParagraphStyle("cert_batch", fontSize=14, leading=18, textColor=GRAY),
+    ))
+    elements.append(Spacer(1, 30))
+
+    # Signatures Table (Replaces old Metadata table)
+    sig_meghana = Paragraph(
+        "<para align='center'><b>MEGHANA MOHAN</b><br/>Center Owner</para>", 
+        ParagraphStyle("sig", fontSize=12, leading=15, textColor=BLACK)
+    )
+    sig_nithin = Paragraph(
+        "<para align='center'><b>NITHIN BHARGAV</b><br/>Head Coach</para>", 
+        ParagraphStyle("sig", fontSize=12, leading=15, textColor=BLACK)
+    )
+
+    meta = Table([[sig_meghana, sig_nithin]], colWidths=[100 * mm, 100 * mm])
+    meta.setStyle(TableStyle([
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 10),
+    ]))
+    
+    # Center the signature table on the page
+    meta_container = Table([[meta]], colWidths=[260 * mm])
+    meta_container.setStyle(TableStyle([("ALIGN", (0, 0), (-1, -1), "CENTER")]))
+    elements.append(meta_container)
+    elements.append(Spacer(1, 20))
+
+    # Footer
+
+    
+    elements.append(Paragraph(
+        f"<para align='center'><b>{os.environ.get('ACADEMY_NAME', 'Chess Klub Mysuru')}</b><br/>"
+        f"{os.environ.get('ACADEMY_ADDRESS', '')}<br/>{os.environ.get('ACADEMY_EMAIL', '')}</para>",
+        ParagraphStyle("cert_academy", fontSize=12, leading=13, textColor=GRAY),
+    ))
+
     doc.build(elements)
     buf.seek(0)
     return buf.read()
