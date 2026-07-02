@@ -1303,6 +1303,69 @@ async def student_attendance(sid: str, user: dict = Depends(get_current_user)):
     return {"counts": counts, "history": history, "percentage": pct}
 
 # ---------------------------- Invoices & Payments ----------------------------
+async def _carry_forward_pending_items(student_id: str, period: Optional[str] = None) -> tuple[List[InvoiceItem], List[dict]]:
+    flt = {
+        "student_id": student_id,
+        "status": {"$in": ["pending", "partial"]},
+        "balance": {"$gt": 0.01},
+    }
+    if period:
+        flt["period"] = {"$ne": period}
+    pending = await db.invoices.find(flt).sort("issued_at", 1).to_list(100)
+    carry_items: List[InvoiceItem] = []
+    sources = []
+    for inv in pending:
+        amount = float(inv.get("amount", 0) or 0)
+        balance = float(inv.get("balance", 0) or 0)
+        if amount <= 0 or balance <= 0:
+            continue
+        ratio = min(1.0, balance / amount)
+        item_total = 0.0
+        invoice_items = inv.get("items") or []
+        for item in invoice_items:
+            carried_amount = round(float(item.get("amount", 0) or 0) * ratio, 2)
+            if carried_amount <= 0:
+                continue
+            item_total = round(item_total + carried_amount, 2)
+            carry_items.append(InvoiceItem(
+                description=f"Carry forward: {item.get('description', 'Invoice item')} (from {inv.get('invoice_no')})",
+                amount=carried_amount,
+            ))
+        remainder = round(balance - item_total, 2)
+        if remainder > 0.01:
+            carry_items.append(InvoiceItem(
+                description=f"Carry forward adjustment (from {inv.get('invoice_no')})",
+                amount=remainder,
+            ))
+        sources.append({
+            "id": str(inv["_id"]),
+            "invoice_no": inv.get("invoice_no"),
+            "period": inv.get("period"),
+            "balance": round(balance, 2),
+        })
+    return carry_items, sources
+
+
+async def _cancel_carried_forward_invoices(sources: List[dict], target_invoice: dict, user: dict) -> None:
+    if not sources:
+        return
+    source_ids = [oid(src["id"]) for src in sources if src.get("id")]
+    if not source_ids:
+        return
+    await db.invoices.update_many(
+        {"_id": {"$in": source_ids}},
+        {"$set": {
+            "status": "cancelled",
+            "balance": 0.0,
+            "cancelled_at": iso(now_utc()),
+            "cancelled_by": user.get("id"),
+            "cancel_reason": "carried_forward",
+            "carried_forward_to": str(target_invoice.get("_id") or target_invoice.get("id")),
+            "carried_forward_to_invoice_no": target_invoice.get("invoice_no"),
+        }},
+    )
+
+
 async def _build_invoice_doc(payload: InvoiceIn, user: dict) -> dict:
     student = await db.students.find_one({"_id": oid(payload.student_id)})
     if not student:
@@ -1323,6 +1386,8 @@ async def _build_invoice_doc(payload: InvoiceIn, user: dict) -> dict:
         "balance": total,
         "status": "pending",
         "notes": payload.notes or "",
+        "reminder_count": 0,
+        "reminder_history": [],
         "issued_at": iso(now_utc()),
         "issued_by": user["id"],
     }
@@ -1440,9 +1505,23 @@ async def list_invoices(student_id: Optional[str] = None, status: Optional[str] 
 
 @api.post("/invoices")
 async def create_invoice(payload: InvoiceIn, user: dict = Depends(require_role("finance", "ops_manager", "front_desk"))):
+    carry_items, carry_sources = await _carry_forward_pending_items(payload.student_id)
+    if carry_items:
+        payload = InvoiceIn(
+            student_id=payload.student_id,
+            period=payload.period,
+            due_date=payload.due_date,
+            items=[*payload.items, *carry_items],
+            notes=payload.notes,
+        )
     inv = await _build_invoice_doc(payload, user)
+    if carry_sources:
+        inv["carried_forward_from"] = carry_sources
     res = await db.invoices.insert_one(inv)
-    saved = serialize_doc({**inv, "_id": res.inserted_id})
+    saved_raw = {**inv, "_id": res.inserted_id}
+    if carry_sources:
+        await _cancel_carried_forward_invoices(carry_sources, saved_raw, user)
+    saved = serialize_doc(saved_raw)
     _send_invoice_created_notifications(saved)
     return saved
 
@@ -1461,6 +1540,10 @@ async def delete_invoice(iid: str, _: dict = Depends(require_role("finance", "op
 async def remind_invoice(iid: str, user: dict = Depends(require_role("finance", "ops_manager", "front_desk"))):
     inv = await db.invoices.find_one({"_id": oid(iid)})
     if not inv: raise HTTPException(404, "Invoice not found")
+    if inv.get("status") == "paid" or float(inv.get("balance", 0) or 0) <= 0:
+        raise HTTPException(400, "Reminder cannot be sent after an invoice is marked paid.")
+    if inv.get("status") == "cancelled":
+        raise HTTPException(400, "Reminder cannot be sent for a cancelled invoice.")
     wa_result = email_result = None
     if inv.get("parent_whatsapp"):
         wa_result = send_fee_reminder_whatsapp(inv["parent_whatsapp"], inv)
@@ -1473,12 +1556,29 @@ async def remind_invoice(iid: str, user: dict = Depends(require_role("finance", 
             "due_date": inv.get("due_date", ""),
             "invoice_pdf_url": invoice_pdf_url,
         })
-    return {"whatsapp": wa_result, "email": email_result}
+    reminder_entry = {
+        "sent_at": iso(now_utc()),
+        "sent_by": user.get("id"),
+        "sent_by_name": user.get("name"),
+        "whatsapp": bool(wa_result),
+        "email": bool(email_result),
+    }
+    await db.invoices.update_one(
+        {"_id": oid(iid)},
+        {"$inc": {"reminder_count": 1},
+         "$set": {"last_reminded_at": reminder_entry["sent_at"]},
+         "$push": {"reminder_history": reminder_entry}},
+    )
+    return {"whatsapp": wa_result, "email": email_result, "reminder_count": int(inv.get("reminder_count", 0) or 0) + 1}
 
 @api.post("/payments")
 async def record_payment(payload: PaymentIn, user: dict = Depends(require_role("finance", "ops_manager", "front_desk"))):
     inv = await db.invoices.find_one({"_id": oid(payload.invoice_id)})
     if not inv: raise HTTPException(404, "Invoice not found")
+    if inv.get("status") == "paid" or float(inv.get("balance", 0) or 0) <= 0:
+        raise HTTPException(400, "Invoice is already paid")
+    if inv.get("status") == "cancelled":
+        raise HTTPException(400, "Cannot record payment against a cancelled invoice")
     if payload.amount <= 0:
         raise HTTPException(400, "Amount must be > 0")
     new_paid = round(float(inv.get("paid", 0)) + float(payload.amount), 2)
@@ -1493,6 +1593,7 @@ async def record_payment(payload: PaymentIn, user: dict = Depends(require_role("
         "student_code": inv.get("student_code"),
         "student_name": inv.get("student_name"),
         "period": inv.get("period"),
+        "items": inv.get("items", []),
         "amount": payload.amount,
         "mode": payload.mode,
         "transaction_ref": payload.transaction_ref or "",
@@ -1537,6 +1638,27 @@ async def get_receipt(rid: str, user: dict = Depends(get_current_user)):
     r = await db.receipts.find_one({"_id": oid(rid)})
     if not r: raise HTTPException(404, "Receipt not found")
     return serialize_doc(r)
+
+
+def _receipt_rows_from_items(items: List[dict], paid_amount: float) -> List[List[str]]:
+    valid_items = [i for i in (items or []) if float(i.get("amount", 0) or 0) > 0]
+    if not valid_items:
+        return []
+    item_total = sum(float(i.get("amount", 0) or 0) for i in valid_items)
+    if item_total <= 0:
+        return []
+    ratio = min(1.0, float(paid_amount or 0) / item_total)
+    rows = []
+    allocated = 0.0
+    for idx, item in enumerate(valid_items):
+        if idx == len(valid_items) - 1:
+            amount = round(float(paid_amount or 0) - allocated, 2)
+        else:
+            amount = round(float(item.get("amount", 0) or 0) * ratio, 2)
+            allocated = round(allocated + amount, 2)
+        if amount > 0:
+            rows.append([item.get("description", "Invoice item"), f"{amount:.2f}"])
+    return rows
 
 # ---------------------------- PDF Generation ----------------------------
 ORANGE = colors.HexColor("#F45B2A")
@@ -2046,9 +2168,13 @@ async def invoice_pdf(iid: str, user: dict = Depends(get_current_user)):
 async def receipt_pdf(rid: str, user: dict = Depends(get_current_user)):
     r = await db.receipts.find_one({"_id": oid(rid)})
     if not r: raise HTTPException(404, "Receipt not found")
-    rows = [
-        [f"Payment for invoice {r['invoice_no']} ({r.get('period')})", f"{r['amount']:.2f}"],
-    ]
+    receipt_items = r.get("items") or []
+    if not receipt_items and r.get("invoice_id"):
+        inv = await db.invoices.find_one({"_id": oid(r["invoice_id"])})
+        receipt_items = (inv or {}).get("items") or []
+    rows = _receipt_rows_from_items(receipt_items, float(r.get("amount", 0) or 0))
+    if not rows:
+        rows = [[f"Invoice {r['invoice_no']} ({r.get('period')})", f"{r['amount']:.2f}"]]
     totals = [
         ["Previous Balance", f"INR {r['previous_balance']:.2f}"],
         ["Amount Paid", f"INR {r['amount']:.2f}"],
@@ -2864,7 +2990,13 @@ async def portal_receipt_pdf(token: str, rid: str):
     r = await db.receipts.find_one({"_id": oid(rid)})
     if not r or r.get("student_id") != sid:
         raise HTTPException(404, "Receipt not found")
-    rows = [[f"Payment for invoice {r['invoice_no']} ({r.get('period')})", f"{r['amount']:.2f}"]]
+    receipt_items = r.get("items") or []
+    if not receipt_items and r.get("invoice_id"):
+        inv = await db.invoices.find_one({"_id": oid(r["invoice_id"])})
+        receipt_items = (inv or {}).get("items") or []
+    rows = _receipt_rows_from_items(receipt_items, float(r.get("amount", 0) or 0))
+    if not rows:
+        rows = [[f"Invoice {r['invoice_no']} ({r.get('period')})", f"{r['amount']:.2f}"]]
     totals = [
         ["Previous Balance", f"INR {r['previous_balance']:.2f}"],
         ["Amount Paid", f"INR {r['amount']:.2f}"],
@@ -2886,7 +3018,7 @@ async def portal_receipt_pdf(token: str, rid: str):
 async def student_pending_balance(sid: str, user: dict = Depends(get_current_user)):
     invoices = await db.invoices.find(
         {"student_id": sid, "status": {"$in": ["pending", "partial"]}},
-        {"invoice_no": 1, "period": 1, "balance": 1, "due_date": 1},
+        {"invoice_no": 1, "period": 1, "balance": 1, "due_date": 1, "items": 1},
     ).to_list(200)
     total = round(sum(float(i.get("balance", 0)) for i in invoices), 2)
     return {
@@ -2908,7 +3040,7 @@ class SubscriptionRenewalRunIn(BaseModel):
 @api.post("/billing/monthly-run")
 async def monthly_billing_run(payload: MonthlyRunIn, user: dict = Depends(require_role("finance", "ops_manager"))):
     # Skip students who already have an invoice for this period
-    existing = await db.invoices.find({"period": payload.period}, {"student_id": 1}).to_list(5000)
+    existing = await db.invoices.find({"period": payload.period, "status": {"$ne": "cancelled"}}, {"student_id": 1}).to_list(5000)
     already_billed = {x["student_id"] for x in existing}
 
     flt = {"status": "active"}
@@ -2940,30 +3072,27 @@ async def monthly_billing_run(payload: MonthlyRunIn, user: dict = Depends(requir
         if config["plan"] == "custom" and int(config.get("days") or 0) <= 0:
             skipped.append({"student_id": sid_str, "reason": "custom_plan_duration_missing"})
             continue
-        items = [{"description": f"{lv['name']} - {config['label']} fee ({payload.period})", "amount": fee_amt}]
+        items = [InvoiceItem(description=f"{lv['name']} - {config['label']} fee ({payload.period})", amount=fee_amt)]
+        carry_sources = []
 
         # Carry-over: include all pending balances from previous periods
         if payload.include_pending:
-            pending = await db.invoices.find(
-                {"student_id": sid_str, "status": {"$in": ["pending", "partial"]}, "period": {"$ne": payload.period}},
-                {"balance": 1, "invoice_no": 1, "period": 1},
-            ).to_list(50)
-            for p in pending:
-                if float(p.get("balance", 0)) > 0:
-                    items.append({
-                        "description": f"Outstanding from {p.get('period')} (Inv {p.get('invoice_no')})",
-                        "amount": float(p["balance"]),
-                    })
+            carry_items, carry_sources = await _carry_forward_pending_items(sid_str, payload.period)
+            items.extend(carry_items)
 
         inv_payload = InvoiceIn(
             student_id=sid_str, period=payload.period, due_date=payload.due_date,
-            items=[InvoiceItem(**i) for i in items], notes="Auto-generated by monthly run",
+            items=items, notes="Auto-generated by monthly run",
         )
         inv = await _build_invoice_doc(inv_payload, user)
         inv["payment_plan"] = config["plan"]
         inv["plan_label"] = config["label"]
         inv["plan_duration_days"] = config["days"]
+        if carry_sources:
+            inv["carried_forward_from"] = carry_sources
         res = await db.invoices.insert_one(inv)
+        if carry_sources:
+            await _cancel_carried_forward_invoices(carry_sources, {**inv, "_id": res.inserted_id}, user)
         created.append({"student_id": sid_str, "invoice_no": inv["invoice_no"], "amount": inv["amount"]})
 
     return {"created": created, "skipped": skipped, "total_created": len(created)}

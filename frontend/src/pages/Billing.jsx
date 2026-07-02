@@ -65,16 +65,8 @@ export default function Billing() {
     // Auto-add outstanding balance from prior invoices
     try {
       const { data } = await api.get(`/students/${sid}/pending-balance`);
-      (data.invoices || []).forEach((inv) => {
-        if (inv.balance > 0) {
-          newItems.push({
-            description: `Outstanding from ${inv.period} (Inv ${inv.invoice_no})`,
-            amount: Number(inv.balance),
-          });
-        }
-      });
       if (data.total_balance > 0) {
-        toast.info(`Carrying over ₹${data.total_balance.toLocaleString("en-IN")} outstanding from ${data.open_invoice_count} prior invoice${data.open_invoice_count === 1 ? "" : "s"}`);
+        toast.info(`₹${data.total_balance.toLocaleString("en-IN")} outstanding will be carried forward and earlier invoice${data.open_invoice_count === 1 ? "" : "s"} cancelled`);
       }
     } catch { /* non-fatal */ }
     if (newItems.length) setForm((f)=>({ ...f, items: newItems }));
@@ -110,7 +102,8 @@ export default function Billing() {
       const { data } = await api.post(`/invoices/${id}/remind`);
       const wa = data.whatsapp?.mode === "log" ? "WhatsApp logged (mock)" : data.whatsapp?.sent ? "WhatsApp sent" : "—";
       const em = data.email?.mode === "log" ? "Email logged (mock)" : data.email?.sent ? "Email sent" : "—";
-      toast.success(`Reminder fired · ${wa} · ${em}`);
+      toast.success(`Reminder #${data.reminder_count} fired · ${wa} · ${em}`);
+      load();
     } catch (ex) { toast.error(formatApiError(ex.response?.data?.detail)); }
   };
 
@@ -237,6 +230,7 @@ export default function Billing() {
             <SelectItem value="pending">Pending</SelectItem>
             <SelectItem value="partial">Partial</SelectItem>
             <SelectItem value="paid">Paid</SelectItem>
+            <SelectItem value="cancelled">Cancelled</SelectItem>
           </SelectContent>
         </Select>
         <button onClick={exportCsv} className="ck-btn-ghost text-xs flex items-center gap-1" data-testid="invoices-export"><Download size={12}/> Export</button>
@@ -271,10 +265,16 @@ export default function Billing() {
                        href={pdfUrl(`/api/invoices/${inv.id}/pdf`)} data-testid={`inv-pdf-${inv.id}`}>
                       <FileText size={12}/> PDF
                     </a>
-                    <button className="att-btn flex items-center gap-1" onClick={()=>remind(inv.id)} data-testid={`inv-remind-${inv.id}`}>
-                      <Bell size={12}/> Remind
+                    <button
+                      className="att-btn flex items-center gap-1"
+                      onClick={()=>remind(inv.id)}
+                      disabled={inv.status === "paid" || inv.status === "cancelled"}
+                      data-testid={`inv-remind-${inv.id}`}
+                      title={`${inv.reminder_count || 0} reminder${Number(inv.reminder_count || 0) === 1 ? "" : "s"} sent`}
+                    >
+                      <Bell size={12}/> Remind {inv.reminder_count ? `(${inv.reminder_count})` : ""}
                     </button>
-                    {inv.status !== "paid" && (
+                    {inv.status !== "paid" && inv.status !== "cancelled" && (
                       <button className="att-btn active P flex items-center gap-1"
                         onClick={()=>{ setPayOpen(inv); setPay({ amount: inv.balance, mode:"cash", transaction_ref:"" }); }}
                         data-testid={`inv-pay-${inv.id}`}>
