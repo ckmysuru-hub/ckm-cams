@@ -2790,7 +2790,7 @@ async def portal_data(token: str):
         {"batch_id": batch_id},
         {"marks": 1, "session_date": 1, "topic": 1, "coach_id": 1, "coach_name": 1},
     ).sort("session_date", -1).limit(60).to_list(60) if batch_id else []
-    counts = {"P": 0, "A": 0}
+    counts = {"P": 0, "A": 0, "L": 0, "LT": 0, "H": 0}
     history = []
     for sess in sessions:
         st = (sess.get("marks") or {}).get(sid_str)
@@ -2803,7 +2803,7 @@ async def portal_data(token: str):
                 "coach_id": sess.get("coach_id"),
                 "coach_name": sess.get("coach_name", ""),
             })
-    total = sum(counts[k] for k in ["P", "A", "L", "LT"])
+    total = counts["P"] + counts["A"] + counts["L"] + counts["LT"]
     pct = round((counts["P"] + counts["LT"]) / total * 100, 1) if total else 0
     # invoices + receipts
     inv = await db.invoices.find({"student_id": sid_str}).sort("issued_at", -1).to_list(200)
