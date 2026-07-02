@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { api, formatApiError } from "@/lib/api";
+import { api, formatApiError, pdfUrl } from "@/lib/api";
 import PageHeader from "@/components/PageHeader";
 import PhoneNumberInput from "@/components/PhoneNumberInput";
 import { Input } from "@/components/ui/input";
@@ -17,7 +17,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Plus, Search, Pencil, Trash2, Download, Upload, Filter } from "lucide-react";
+import { Plus, Search, Pencil, Trash2, Download, Upload, Filter, IdCard, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { downloadCsv, parseCsv } from "@/lib/csv";
 import { SortableHead, applySort } from "@/components/SortableHead";
@@ -26,6 +26,7 @@ const empty = {
   full_name: "", dob: "", gender: "male", parent_name: "", parent_whatsapp: "",
   parent_email: "", address: "", level_id: "", batch_id: "", payment_plan: "monthly",
   subscription_start: "", subscription_end: "", concession_pct: 0, referred_by: "", status: "active",
+  photo_url: "",
 };
 
 const pickForm = (s) => ({
@@ -36,6 +37,7 @@ const pickForm = (s) => ({
   payment_plan: s.payment_plan || "monthly", concession_pct: s.concession_pct ?? 0,
   subscription_start: s.subscription_start || "", subscription_end: s.subscription_end || "",
   referred_by: s.referred_by || "", status: s.status || "active",
+  photo_url: s.photo_url || "",
 });
 
 export default function Students() {
@@ -54,6 +56,7 @@ export default function Students() {
   const [importing, setImporting] = useState(false);
   const [pendingLevel, setPendingLevel] = useState(null);
   const [savingLevel, setSavingLevel] = useState(false);
+  const [photoUploading, setPhotoUploading] = useState(false);
 
   const load = () => api.get("/students", { params: q ? { q } : {} }).then((r) => setItems(r.data));
   useEffect(() => { load(); }, [q]);
@@ -81,6 +84,26 @@ export default function Students() {
       setOpen(false); setForm(empty); setEditingId(null); load();
     } catch (ex) { toast.error(formatApiError(ex.response?.data?.detail)); }
     finally { setSubmitting(false); }
+  };
+
+  const uploadPhoto = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setPhotoUploading(true);
+    try {
+      const body = new FormData();
+      body.append("photo", file);
+      const { data } = await api.post("/registrations/public/photo", body, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      setForm((f) => ({ ...f, photo_url: data.photo_url }));
+      toast.success("Photo uploaded");
+    } catch (ex) {
+      toast.error(formatApiError(ex.response?.data?.detail) || "Photo upload failed");
+    } finally {
+      setPhotoUploading(false);
+    }
   };
 
   const del = async (s) => {
@@ -222,6 +245,13 @@ export default function Students() {
                       <SelectItem value="other">Other</SelectItem>
                     </SelectContent>
                   </Select>
+                </Field>
+                <Field label="Student Photo">
+                  <label className="h-10 px-3 rounded-md border border-[var(--ck-line)] bg-white flex items-center justify-center gap-2 text-sm cursor-pointer hover:border-[var(--ck-orange)]">
+                    {photoUploading ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}
+                    {form.photo_url ? "Photo uploaded" : photoUploading ? "Uploading..." : "Upload photo"}
+                    <input type="file" accept="image/*" hidden onChange={uploadPhoto} disabled={photoUploading} data-testid="sf-photo" />
+                  </label>
                 </Field>
                 <Field label="Parent Name" required>
                   <Input data-testid="sf-parent" value={form.parent_name} onChange={(e)=>setForm({...form, parent_name:e.target.value})} required />
@@ -398,6 +428,9 @@ export default function Students() {
                     <button className="att-btn flex items-center gap-1" onClick={() => startEdit(s)} data-testid={`student-edit-${s.id}`}>
                       <Pencil size={12}/> Edit
                     </button>
+                    <a className="att-btn flex items-center gap-1" href={pdfUrl(`/api/students/${s.id}/id-card.pdf`)} target="_blank" rel="noreferrer" data-testid={`student-id-card-${s.id}`}>
+                      <IdCard size={12}/> ID
+                    </a>
                     <button className="att-btn flex items-center gap-1 hover:!border-red-500 hover:!text-red-600" onClick={() => del(s)} data-testid={`student-delete-${s.id}`}>
                       <Trash2 size={12}/>
                     </button>

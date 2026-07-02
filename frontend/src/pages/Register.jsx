@@ -4,18 +4,20 @@ import PhoneNumberInput from "@/components/PhoneNumberInput";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { CheckCircle2, Loader2 } from "lucide-react";
+import { CheckCircle2, Loader2, Upload } from "lucide-react";
 
 const empty = {
   full_name: "", dob: "", gender: "male", parent_name: "",
   parent_whatsapp: "", parent_email: "", address: "",
   level_preference: "", referred_by: "", notes: "",
+  photo_url: "",
 };
 
 export default function Register() {
   const [meta, setMeta] = useState(null);
   const [form, setForm] = useState(empty);
   const [submitting, setSubmitting] = useState(false);
+  const [photoUploading, setPhotoUploading] = useState(false);
   const [done, setDone] = useState(false);
   const [err, setErr] = useState("");
 
@@ -33,6 +35,26 @@ export default function Register() {
     } catch (ex) {
       setErr(formatApiError(ex.response?.data?.detail) || "Could not submit");
     } finally { setSubmitting(false); }
+  };
+
+  const uploadPhoto = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setErr("");
+    setPhotoUploading(true);
+    try {
+      const body = new FormData();
+      body.append("photo", file);
+      const { data } = await api.post("/registrations/public/photo", body, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      setForm((f) => ({ ...f, photo_url: data.photo_url }));
+    } catch (ex) {
+      setErr(formatApiError(ex.response?.data?.detail) || "Could not upload photo");
+    } finally {
+      setPhotoUploading(false);
+    }
   };
 
   if (done) {
@@ -101,6 +123,13 @@ export default function Register() {
                   <SelectItem value="other">Other</SelectItem>
                 </SelectContent>
               </Select>
+            </Field>
+            <Field label="Student photograph">
+              <label className="h-10 px-3 rounded-md border border-[var(--ck-line)] bg-white flex items-center justify-center gap-2 text-sm cursor-pointer hover:border-[var(--ck-orange)]">
+                {photoUploading ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}
+                {form.photo_url ? "Photo uploaded" : photoUploading ? "Uploading..." : "Upload photo"}
+                <input type="file" accept="image/*" hidden onChange={uploadPhoto} disabled={photoUploading} data-testid="rf-photo" />
+              </label>
             </Field>
             <Field label="Preferred level">
               <Select value={form.level_preference || "_open"} onValueChange={(v)=>setForm({...form, level_preference: v === "_open" ? "" : v})}>

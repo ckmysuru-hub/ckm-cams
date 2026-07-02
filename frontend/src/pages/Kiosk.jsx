@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, formatApiError } from "@/lib/api";
 import { Logo } from "@/components/Brand";
-import { LogIn, LogOut, Loader2, Clock, CheckCircle2, AlertTriangle } from "lucide-react";
+import { LogIn, LogOut, Loader2, Clock, CheckCircle2, AlertTriangle, QrCode, Camera } from "lucide-react";
 
 const fmtTime = (iso) => {
   if (!iso) return "—";
@@ -17,7 +17,12 @@ export default function Kiosk() {
   const [feedback, setFeedback] = useState(null);
   const [recent, setRecent] = useState([]);
   const [now, setNow] = useState(new Date());
+  const [scanActive, setScanActive] = useState(false);
+  const [scanError, setScanError] = useState("");
   const inputRef = useRef(null);
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
+  const scanBusyRef = useRef(false);
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -34,14 +39,67 @@ export default function Kiosk() {
     return () => { ignore = true; clearInterval(t); };
   }, []);
 
-  const submit = async (e) => {
-    e?.preventDefault?.();
-    const codeNumber = code.replace(/\D/g, "");
-    if (!codeNumber) return;
+  useEffect(() => {
+    if (!scanActive) {
+      streamRef.current?.getTracks?.().forEach((track) => track.stop());
+      streamRef.current = null;
+      return;
+    }
+    let cancelled = false;
+    let detector = null;
+    const start = async () => {
+      setScanError("");
+      if (!("BarcodeDetector" in window)) {
+        setScanError("QR camera scan is not supported on this browser. Use the student ID below.");
+        setScanActive(false);
+        return;
+      }
+      try {
+        detector = new window.BarcodeDetector({ formats: ["qr_code"] });
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+        streamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          await videoRef.current.play();
+        }
+        const tick = async () => {
+          if (cancelled || !videoRef.current || scanBusyRef.current) return;
+          try {
+            const codes = await detector.detect(videoRef.current);
+            const value = codes?.[0]?.rawValue;
+            if (value) {
+              scanBusyRef.current = true;
+              await submitValue(value);
+              setScanActive(false);
+              scanBusyRef.current = false;
+            }
+          } catch (_) { /* keep scanning */ }
+          if (!cancelled) requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      } catch {
+        setScanError("Camera permission was denied or no camera is available. Use the student ID below.");
+        setScanActive(false);
+      }
+    };
+    start();
+    return () => {
+      cancelled = true;
+      streamRef.current?.getTracks?.().forEach((track) => track.stop());
+      streamRef.current = null;
+      scanBusyRef.current = false;
+    };
+  }, [scanActive]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const submitValue = async (value) => {
+    const raw = (value || "").trim();
+    const codeNumber = raw.replace(/\D/g, "");
+    if (!raw || (!raw.includes("CKM-CHECKIN:") && !raw.includes("CKM-") && !codeNumber)) return;
     setBusy(true); setFeedback(null);
     try {
       const path = mode === "in" ? "/kiosk/checkin" : "/kiosk/checkout";
-      const { data } = await api.post(path, { code: `CKM-${codeNumber}` });
+      const payloadCode = raw.includes("CKM-CHECKIN:") || raw.includes("CKM-") ? raw : `CKM-${codeNumber}`;
+      const { data } = await api.post(path, { code: payloadCode });
       setFeedback({ ok: true, ...data, mode });
       setCode("");
       setTimeout(() => setFeedback(null), 5000);
@@ -52,6 +110,11 @@ export default function Kiosk() {
       setBusy(false);
       inputRef.current?.focus();
     }
+  };
+
+  const submit = async (e) => {
+    e?.preventDefault?.();
+    await submitValue(code);
   };
 
   const pad = (k) => {
@@ -76,6 +139,29 @@ export default function Kiosk() {
           <h1 className="ck-display text-4xl sm:text-5xl lg:text-6xl font-semibold text-center mb-8 max-w-2xl leading-[1.05]">
             Welcome to the board.
           </h1>
+
+          <div className="w-full max-w-md ck-card-elevated p-4 mb-6">
+            <div className="flex items-center justify-between gap-3 mb-3">
+              <div>
+                <div className="text-xs uppercase tracking-wider font-semibold text-[var(--ck-muted)]">QR check-in</div>
+                <div className="ck-display text-xl font-semibold">Scan student ID card</div>
+              </div>
+              <QrCode size={22} className="text-[var(--ck-orange)]" />
+            </div>
+            {scanActive ? (
+              <video ref={videoRef} className="w-full aspect-video rounded-md bg-black object-cover" muted playsInline />
+            ) : (
+              <button type="button" onClick={() => setScanActive(true)} className="w-full h-12 rounded-md border border-[var(--ck-line)] bg-white flex items-center justify-center gap-2 font-semibold text-sm hover:border-[var(--ck-orange)]">
+                <Camera size={16} /> Start camera scan
+              </button>
+            )}
+            {scanActive && (
+              <button type="button" onClick={() => setScanActive(false)} className="mt-3 w-full ck-btn-ghost text-sm">
+                Stop scan
+              </button>
+            )}
+            {scanError && <div className="text-xs text-red-700 mt-3">{scanError}</div>}
+          </div>
 
           <div className="flex gap-2 mb-6">
             <button

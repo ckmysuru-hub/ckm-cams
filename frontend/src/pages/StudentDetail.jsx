@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { ChevronLeft, Pencil, Trash2, Link2, Share2, Copy, CalendarCheck, RefreshCw, Award, Upload } from "lucide-react";
+import { ChevronLeft, Pencil, Trash2, Link2, Share2, Copy, CalendarCheck, RefreshCw, Award, Upload, IdCard } from "lucide-react";
 import { toast } from "sonner";
 
 const fmtINR = (n) => `₹${Number(n||0).toLocaleString("en-IN")}`;
@@ -20,7 +20,7 @@ const pickForm = (s) => ({
   level_id: s.level_id || "", batch_id: s.batch_id || "",
   payment_plan: s.payment_plan || "monthly", concession_pct: s.concession_pct ?? 0,
   subscription_start: s.subscription_start || "", subscription_end: s.subscription_end || "",
-  referred_by: s.referred_by || "", status: s.status || "active",
+  referred_by: s.referred_by || "", status: s.status || "active", photo_url: s.photo_url || "",
 });
 
 export default function StudentDetail() {
@@ -163,6 +163,9 @@ export default function StudentDetail() {
             <button className="ck-btn-ghost flex items-center gap-2" onClick={startEdit} data-testid="student-edit-btn">
               <Pencil size={14}/> Edit
             </button>
+            <a className="ck-btn-ghost flex items-center gap-2" href={pdfUrl(`/api/students/${id}/id-card.pdf`)} target="_blank" rel="noreferrer" data-testid="student-id-card-btn">
+              <IdCard size={14}/> ID Card
+            </a>
             <button className="ck-btn-ghost flex items-center gap-2 hover:!border-red-500 hover:!text-red-600" onClick={del} data-testid="student-delete-btn">
               <Trash2 size={14}/> Delete
             </button>

@@ -11,6 +11,7 @@ import uuid
 import asyncio
 import logging
 import secrets
+import re
 from datetime import datetime, timezone, timedelta, date
 from typing import List, Optional, Literal
 
@@ -34,6 +35,8 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from reportlab.pdfgen import canvas as rl_canvas
 from reportlab.graphics.barcode import qr
 from reportlab.graphics.shapes import Drawing
+from reportlab.graphics import renderPDF
+from reportlab.lib.utils import ImageReader
 
 import requests
 import smtplib
@@ -78,6 +81,8 @@ APP_ENV = os.environ.get("APP_ENV", os.environ.get("ENVIRONMENT", "development")
 STUDENT_CODE_START = 10001
 AUTO_INVOICE_CHECK_INTERVAL_SECONDS = int(os.environ.get("AUTO_INVOICE_CHECK_INTERVAL_SECONDS", "21600"))
 auto_invoice_task: Optional[asyncio.Task] = None
+UPLOAD_DIR = ROOT_DIR / "uploads"
+STUDENT_PHOTO_DIR = UPLOAD_DIR / "student-photos"
 
 level_urls = {
     "Beginner Level 1": "https://my.chessklub.com/spaces/3728452/content",
@@ -163,6 +168,20 @@ def serialize_doc(doc: dict) -> dict:
     if "_id" in doc:
         doc["id"] = str(doc.pop("_id"))
     return doc
+
+def public_file_url(path: str) -> str:
+    return f"{public_backend_url()}{path}"
+
+def _safe_upload_ext(filename: str, content_type: str) -> str:
+    ext = Path(filename or "").suffix.lower()
+    allowed = {".jpg", ".jpeg", ".png", ".webp"}
+    if ext in allowed:
+        return ext
+    if content_type == "image/png":
+        return ".png"
+    if content_type == "image/webp":
+        return ".webp"
+    return ".jpg"
 
 def validate_subscription_dates(start_iso: Optional[str], end_iso: Optional[str]) -> None:
     def parse_date(value: Optional[str], field: str):
@@ -319,12 +338,20 @@ class UserCreate(BaseModel):
 @app.on_event("startup")
 async def startup():
     global auto_invoice_task
+    STUDENT_PHOTO_DIR.mkdir(parents=True, exist_ok=True)
     await db.users.create_index("email", unique=True)
     await db.students.create_index("student_code", unique=True, sparse=True)
     await db.invoices.create_index("invoice_no", unique=True, sparse=True)
     await db.receipts.create_index("receipt_no", unique=True, sparse=True)
     await db.attendance.create_index([("batch_id", 1), ("session_date", 1)], unique=True)
     await db.checkins.create_index([("student_id", 1), ("check_in_date", 1)], unique=True)
+    await db.whatsapp_messages.create_index("created_at")
+    await db.whatsapp_messages.create_index("to")
+    await db.whatsapp_events.create_index("received_at")
+    await db.whatsapp_inbound_messages.create_index("message_id", unique=True, sparse=True)
+    await db.whatsapp_inbound_messages.create_index([("from", 1), ("received_at", -1)])
+    await db.whatsapp_statuses.create_index("message_id")
+    await db.whatsapp_statuses.create_index([("recipient_id", 1), ("received_at", -1)])
     await db.counters.create_index("key", unique=True)
     # seed admin
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@chessklub.in")
@@ -429,16 +456,48 @@ async def gen_receipt_no() -> str:
     return f"RCP-{today.year}-{today.month:02d}-{n:04d}"
 
 # ---------------------------- Notifications ----------------------------
+async def _persist_whatsapp_message(doc: dict) -> None:
+    try:
+        await db.whatsapp_messages.insert_one(doc)
+    except Exception as e:
+        logger.warning(f"failed to persist whatsapp message: {e}")
+
+
+def _schedule_whatsapp_message_log(doc: dict) -> None:
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_persist_whatsapp_message(doc))
+    except RuntimeError:
+        logger.debug(f"[WHATSAPP LOG] {doc}")
+
+
+def _whatsapp_response_message_ids(result: dict) -> List[str]:
+    messages = ((result or {}).get("response") or {}).get("messages") or []
+    return [m.get("id") for m in messages if m.get("id")]
+
+
 def send_whatsapp_template(to_phone: str, template_name: str, language_code: str,
                            body_params: List[str]) -> dict:
     """Send an approved WhatsApp template message (works outside the 24h window)."""
     token = os.environ.get("WHATSAPP_TOKEN")
     phone_id = os.environ.get("WHATSAPP_PHONE_NUMBER_ID")
     version = os.environ.get("WHATSAPP_GRAPH_VERSION", "v21.0")
+    to_norm = (to_phone or "").replace("+", "").replace(" ", "").replace("-", "")
     if not (token and phone_id):
         logger.debug(f"[WHATSAPP MOCK TMPL] to={to_phone} tpl={template_name} params={len(body_params or [])}")
-        return {"sent": False, "mode": "log", "to": to_phone}
-    to_norm = (to_phone or "").replace("+", "").replace(" ", "").replace("-", "")
+        result = {"sent": False, "mode": "log", "to": to_phone}
+        _schedule_whatsapp_message_log({
+            "to": to_norm or to_phone,
+            "display_to": to_phone,
+            "template": template_name,
+            "language": language_code,
+            "params": body_params or [],
+            "result": result,
+            "message_ids": [],
+            "created_at": iso(now_utc()),
+            "status": "log_only",
+        })
+        return result
     url = f"https://graph.facebook.com/{version}/{phone_id}/messages"
     payload = {
         "messaging_product": "whatsapp",
@@ -463,10 +522,34 @@ def send_whatsapp_template(to_phone: str, template_name: str, language_code: str
             data = {"raw": r.text}
         if not ok:
             logger.warning(f"WhatsApp template send failed [{r.status_code}]: {data}")
-        return {"sent": ok, "mode": "meta_cloud_template", "status": r.status_code, "response": data}
+        result = {"sent": ok, "mode": "meta_cloud_template", "status": r.status_code, "response": data}
+        _schedule_whatsapp_message_log({
+            "to": to_norm,
+            "display_to": to_phone,
+            "template": template_name,
+            "language": language_code,
+            "params": body_params or [],
+            "result": result,
+            "message_ids": _whatsapp_response_message_ids(result),
+            "created_at": iso(now_utc()),
+            "status": "sent" if ok else "failed",
+        })
+        return result
     except Exception as e:
         logger.warning(f"WhatsApp template send exception: {e}")
-        return {"sent": False, "mode": "error", "error": str(e)}
+        result = {"sent": False, "mode": "error", "error": str(e)}
+        _schedule_whatsapp_message_log({
+            "to": to_norm,
+            "display_to": to_phone,
+            "template": template_name,
+            "language": language_code,
+            "params": body_params or [],
+            "result": result,
+            "message_ids": [],
+            "created_at": iso(now_utc()),
+            "status": "failed",
+        })
+        return result
 
 
 def whatsapp_template_language() -> str:
@@ -968,6 +1051,16 @@ async def get_student(sid: str, user: dict = Depends(get_current_user)):
     if not s:
         raise HTTPException(404, "Student not found")
     return serialize_doc(s)
+
+@api.get("/students/{sid}/id-card.pdf")
+async def student_id_card_pdf(sid: str, user: dict = Depends(get_current_user)):
+    s = await db.students.find_one({"_id": oid(sid)})
+    if not s:
+        raise HTTPException(404, "Student not found")
+    pdf = _build_student_id_card_pdf(s)
+    filename = f"{_safe_filename(s.get('student_code') or s.get('full_name'), 'student')}_id_card.pdf"
+    return StreamingResponse(io.BytesIO(pdf), media_type="application/pdf",
+                             headers={"Content-Disposition": f'inline; filename="{filename}"'})
 
 @api.put("/students/{sid}")
 async def update_student(sid: str, payload: StudentIn, user: dict = Depends(require_role("ops_manager", "front_desk"))):
@@ -1487,6 +1580,89 @@ def _qr_flowable(value: str, size_mm: int = 32) -> Drawing:
     drawing.add(widget)
     return drawing
 
+def student_qr_payload(student_code: str) -> str:
+    return f"CKM-CHECKIN:{student_code}"
+
+def _student_photo_path(photo_url: Optional[str]) -> Optional[Path]:
+    if not photo_url or not photo_url.startswith("/uploads/student-photos/"):
+        return None
+    candidate = ROOT_DIR / photo_url.lstrip("/")
+    return candidate if candidate.exists() else None
+
+def _build_student_id_card_pdf(student: dict) -> bytes:
+    width, height = 86 * mm, 54 * mm
+    buf = io.BytesIO()
+    c = rl_canvas.Canvas(buf, pagesize=(width, height))
+
+    c.setFillColor(colors.white)
+    c.rect(0, 0, width, height, fill=1, stroke=0)
+    c.setFillColor(BLACK)
+    c.rect(0, height - 13 * mm, width, 13 * mm, fill=1, stroke=0)
+    c.setFillColor(ORANGE)
+    c.rect(0, height - 15 * mm, width, 2 * mm, fill=1, stroke=0)
+
+    logo_bytes = fetch_logo_bytes()
+    if logo_bytes:
+        try:
+            c.drawImage(ImageReader(io.BytesIO(logo_bytes)), 4 * mm, height - 11 * mm, 8 * mm, 8 * mm, preserveAspectRatio=True, mask="auto")
+        except Exception:
+            pass
+    c.setFillColor(colors.white)
+    c.setFont("Helvetica-Bold", 9)
+    c.drawString(14 * mm, height - 7 * mm, os.environ.get("ACADEMY_NAME", "Chess Klub Mysuru"))
+    c.setFont("Helvetica", 5.5)
+    c.drawString(14 * mm, height - 10 * mm, "Student Identity Card")
+
+    photo_x, photo_y, photo_w, photo_h = 5 * mm, 20 * mm, 22 * mm, 24 * mm
+    c.setStrokeColor(colors.HexColor("#dddddd"))
+    c.setFillColor(colors.HexColor("#f7f7f7"))
+    c.roundRect(photo_x, photo_y, photo_w, photo_h, 2 * mm, fill=1, stroke=1)
+    photo_path = _student_photo_path(student.get("photo_url"))
+    if photo_path:
+        try:
+            c.drawImage(ImageReader(str(photo_path)), photo_x, photo_y, photo_w, photo_h, preserveAspectRatio=True, anchor="c", mask="auto")
+        except Exception:
+            pass
+    else:
+        c.setFillColor(GRAY)
+        c.setFont("Helvetica", 6)
+        c.drawCentredString(photo_x + photo_w / 2, photo_y + photo_h / 2, "PHOTO")
+
+    c.setFillColor(BLACK)
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(31 * mm, 40 * mm, (student.get("full_name") or "")[:28])
+    c.setFont("Helvetica", 7)
+    c.setFillColor(GRAY)
+    c.drawString(31 * mm, 35.5 * mm, f"ID: {student.get('student_code', '')}")
+    if student.get("dob"):
+        c.drawString(31 * mm, 31.5 * mm, f"DOB: {student.get('dob')}")
+    if student.get("parent_name"):
+        c.drawString(31 * mm, 27.5 * mm, f"Parent: {(student.get('parent_name') or '')[:24]}")
+    if student.get("parent_whatsapp"):
+        c.drawString(31 * mm, 23.5 * mm, f"WA: {student.get('parent_whatsapp')}")
+
+    qr_size = 20 * mm
+    drawing = _qr_flowable(student_qr_payload(student.get("student_code", "")), size_mm=20)
+    renderPDF.draw(drawing, c, width - 25 * mm, 20 * mm)
+    c.setFillColor(BLACK)
+    c.setFont("Helvetica-Bold", 5.5)
+    c.drawCentredString(width - 15 * mm, 17.5 * mm, "SCAN AT KIOSK")
+
+    c.setFillColor(colors.HexColor("#f7f7f7"))
+    c.rect(0, 0, width, 12 * mm, fill=1, stroke=0)
+    c.setFillColor(GRAY)
+    c.setFont("Helvetica", 5.5)
+    c.drawString(4 * mm, 7 * mm, os.environ.get("ACADEMY_PHONE", ""))
+    c.drawString(4 * mm, 4 * mm, os.environ.get("ACADEMY_EMAIL", ""))
+    c.setFillColor(ORANGE)
+    c.setFont("Helvetica-Bold", 7)
+    c.drawRightString(width - 4 * mm, 5 * mm, student.get("student_code", ""))
+
+    c.showPage()
+    c.save()
+    buf.seek(0)
+    return buf.read()
+
 def _paid_seal(canvas, doc) -> None:
     canvas.saveState()
     try:
@@ -1988,6 +2164,323 @@ async def get_academy(user: dict = Depends(get_current_user)):
         },
     }
 
+# ---------------------------- Director Reports ----------------------------
+REPORT_DEFS = {
+    "monthly-payments": {
+        "title": "Monthly Payments",
+        "headers": ["date", "receipt_no", "invoice_no", "student_code", "student_name", "mode", "amount", "received_by"],
+    },
+    "coach-attendance": {
+        "title": "Monthly Coach Attendance",
+        "headers": ["session_date", "coach_name", "batch", "topic", "present", "absent", "leave", "late", "holiday", "total_marked"],
+    },
+    "pending-payments": {
+        "title": "Pending Payments & Outstanding Balance",
+        "headers": ["due_date", "invoice_no", "student_code", "student_name", "period", "status", "amount", "paid", "balance"],
+    },
+}
+
+
+def _in_date_window(value: Optional[str], start_date: Optional[str], end_date: Optional[str]) -> bool:
+    day = (value or "")[:10]
+    if start_date and day < start_date:
+        return False
+    if end_date and day > end_date:
+        return False
+    return True
+
+
+async def _report_rows(report_type: str, start_date: Optional[str], end_date: Optional[str]) -> List[dict]:
+    if report_type == "monthly-payments":
+        receipts = await db.receipts.find({}).sort("paid_at", -1).to_list(10000)
+        rows = []
+        for r in receipts:
+            paid_on = r.get("paid_at") or r.get("created_at") or ""
+            if not _in_date_window(paid_on, start_date, end_date):
+                continue
+            rows.append({
+                "date": paid_on[:10],
+                "receipt_no": r.get("receipt_no", ""),
+                "invoice_no": r.get("invoice_no", ""),
+                "student_code": r.get("student_code", ""),
+                "student_name": r.get("student_name", ""),
+                "mode": r.get("mode", ""),
+                "amount": round(float(r.get("amount", 0) or 0), 2),
+                "received_by": r.get("received_by", ""),
+            })
+        return rows
+
+    if report_type == "coach-attendance":
+        flt = {}
+        if start_date or end_date:
+            flt["session_date"] = {}
+            if start_date:
+                flt["session_date"]["$gte"] = start_date
+            if end_date:
+                flt["session_date"]["$lte"] = end_date
+        sessions = await db.attendance.find(flt).sort("session_date", -1).to_list(10000)
+        batch_ids = [s.get("batch_id") for s in sessions if s.get("batch_id")]
+        batches = await db.batches.find({"_id": {"$in": [oid(b) for b in batch_ids]}}).to_list(1000) if batch_ids else []
+        batch_map = {str(b["_id"]): b.get("name", "") for b in batches}
+        rows = []
+        for s in sessions:
+            marks = s.get("marks", {}) or {}
+            counts = {"P": 0, "A": 0, "L": 0, "LT": 0, "H": 0}
+            for status in marks.values():
+                if status in counts:
+                    counts[status] += 1
+            rows.append({
+                "session_date": s.get("session_date", ""),
+                "coach_name": s.get("coach_name", "") or "Not set",
+                "batch": batch_map.get(s.get("batch_id"), s.get("batch_id", "")),
+                "topic": s.get("topic", ""),
+                "present": counts["P"],
+                "absent": counts["A"],
+                "leave": counts["L"],
+                "late": counts["LT"],
+                "holiday": counts["H"],
+                "total_marked": sum(counts.values()),
+            })
+        return rows
+
+    if report_type == "pending-payments":
+        invoices = await db.invoices.find({"balance": {"$gt": 0.01}}).sort("due_date", 1).to_list(10000)
+        rows = []
+        for inv in invoices:
+            if not _in_date_window(inv.get("due_date"), start_date, end_date):
+                continue
+            rows.append({
+                "due_date": inv.get("due_date", ""),
+                "invoice_no": inv.get("invoice_no", ""),
+                "student_code": inv.get("student_code", ""),
+                "student_name": inv.get("student_name", ""),
+                "period": inv.get("period", ""),
+                "status": inv.get("status", ""),
+                "amount": round(float(inv.get("amount", 0) or 0), 2),
+                "paid": round(float(inv.get("paid", 0) or 0), 2),
+                "balance": round(float(inv.get("balance", 0) or 0), 2),
+            })
+        return rows
+
+    raise HTTPException(404, "Unknown report")
+
+
+def _csv_response(rows: List[dict], headers: List[str], filename: str) -> StreamingResponse:
+    out = io.StringIO()
+    writer = csv.DictWriter(out, fieldnames=headers)
+    writer.writeheader()
+    writer.writerows(rows)
+    return StreamingResponse(iter([out.getvalue()]), media_type="text/csv",
+                             headers={"Content-Disposition": f'attachment; filename="{filename}.csv"'})
+
+
+def _report_pdf(title: str, rows: List[dict], headers: List[str], filename: str) -> StreamingResponse:
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), rightMargin=12 * mm, leftMargin=12 * mm,
+                            topMargin=12 * mm, bottomMargin=12 * mm)
+    styles = getSampleStyleSheet()
+    story = [
+        Paragraph(title, styles["Title"]),
+        Spacer(1, 6),
+        Paragraph(f"Generated {date.today().isoformat()} · {len(rows)} row(s)", styles["Normal"]),
+        Spacer(1, 10),
+    ]
+    table_data = [[h.replace("_", " ").title() for h in headers]]
+    for row in rows[:500]:
+        table_data.append([str(row.get(h, "")) for h in headers])
+    table = Table(table_data, repeatRows=1)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), BLACK),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 7),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#dddddd")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f7f7f7")]),
+    ]))
+    story.append(table)
+    if len(rows) > 500:
+        story.append(Spacer(1, 8))
+        story.append(Paragraph("PDF preview is limited to 500 rows. Download Excel for the complete export.", styles["Normal"]))
+    doc.build(story)
+    buffer.seek(0)
+    return StreamingResponse(buffer, media_type="application/pdf",
+                             headers={"Content-Disposition": f'attachment; filename="{filename}.pdf"'})
+
+
+@api.get("/reports/{report_type}")
+async def get_report(report_type: str, start_date: Optional[str] = None, end_date: Optional[str] = None,
+                     format: Literal["json", "excel", "pdf"] = "json",
+                     _: dict = Depends(require_role("director"))):
+    meta = REPORT_DEFS.get(report_type)
+    if not meta:
+        raise HTTPException(404, "Unknown report")
+    rows = await _report_rows(report_type, start_date, end_date)
+    headers = meta["headers"]
+    totals = {
+        "rows": len(rows),
+        "amount": round(sum(float(r.get("amount", 0) or 0) for r in rows), 2),
+        "paid": round(sum(float(r.get("paid", 0) or 0) for r in rows), 2),
+        "balance": round(sum(float(r.get("balance", 0) or 0) for r in rows), 2),
+    }
+    filename = f"{report_type}-{start_date or 'start'}-{end_date or 'end'}"
+    if format == "excel":
+        return _csv_response(rows, headers, filename)
+    if format == "pdf":
+        return _report_pdf(meta["title"], rows, headers, filename)
+    return {"title": meta["title"], "headers": headers, "rows": rows, "totals": totals}
+
+
+# ---------------------------- WhatsApp Activity ----------------------------
+def _extract_whatsapp_events(payload: dict) -> dict:
+    messages = []
+    statuses = []
+    for entry in payload.get("entry", []) or []:
+        for change in entry.get("changes", []) or []:
+            value = change.get("value", {}) or {}
+            metadata = value.get("metadata", {}) or {}
+            contacts = {
+                c.get("wa_id"): ((c.get("profile") or {}).get("name") or "")
+                for c in value.get("contacts", []) or []
+            }
+            for msg in value.get("messages", []) or []:
+                text = (msg.get("text") or {}).get("body") or ""
+                received_at = iso(datetime.fromtimestamp(int(msg["timestamp"]), timezone.utc)) if str(msg.get("timestamp", "")).isdigit() else None
+                messages.append({
+                    "message_id": msg.get("id"),
+                    "from": msg.get("from"),
+                    "to": metadata.get("display_phone_number") or metadata.get("phone_number_id"),
+                    "profile_name": contacts.get(msg.get("from"), ""),
+                    "type": msg.get("type"),
+                    "text": text,
+                    "raw": msg,
+                    "timestamp": msg.get("timestamp"),
+                    "received_at": received_at,
+                })
+            for status in value.get("statuses", []) or []:
+                received_at = iso(datetime.fromtimestamp(int(status["timestamp"]), timezone.utc)) if str(status.get("timestamp", "")).isdigit() else None
+                statuses.append({
+                    "message_id": status.get("id"),
+                    "recipient_id": status.get("recipient_id"),
+                    "status": status.get("status"),
+                    "timestamp": status.get("timestamp"),
+                    "received_at": received_at,
+                    "conversation": status.get("conversation"),
+                    "pricing": status.get("pricing"),
+                    "errors": status.get("errors", []),
+                    "raw": status,
+                })
+    return {"messages": messages, "statuses": statuses}
+
+
+async def _persist_parsed_whatsapp_events(body: dict, event_id: str, received_at: str) -> dict:
+    extracted = _extract_whatsapp_events(body)
+    inbound_count = 0
+    status_count = 0
+    for msg in extracted["messages"]:
+        msg_doc = {
+            **msg,
+            "event_id": event_id,
+            "received_at": msg.get("received_at") or received_at,
+            "created_at": received_at,
+        }
+        message_id = msg_doc.get("message_id")
+        if message_id:
+            await db.whatsapp_inbound_messages.update_one(
+                {"message_id": message_id},
+                {"$set": msg_doc},
+                upsert=True,
+            )
+        else:
+            await db.whatsapp_inbound_messages.insert_one(msg_doc)
+        inbound_count += 1
+    for status in extracted["statuses"]:
+        status_doc = {
+            **status,
+            "event_id": event_id,
+            "received_at": status.get("received_at") or received_at,
+            "created_at": received_at,
+        }
+        await db.whatsapp_statuses.insert_one(status_doc)
+        if status_doc.get("message_id"):
+            await db.whatsapp_messages.update_one(
+                {"message_ids": status_doc["message_id"]},
+                {"$set": {
+                    "latest_status": status_doc.get("status"),
+                    "latest_status_at": status_doc.get("received_at"),
+                }},
+            )
+        status_count += 1
+    return {"inbound": inbound_count, "statuses": status_count}
+
+
+@api.get("/whatsapp/messages")
+async def list_whatsapp_messages(start_date: Optional[str] = None, end_date: Optional[str] = None,
+                                 _: dict = Depends(require_role("director"))):
+    sent_docs = await db.whatsapp_messages.find({}).sort("created_at", -1).to_list(1000)
+    legacy_batch = await db.whatsapp_batch_messages.find({}).sort("created_at", -1).to_list(500)
+    legacy_invites = await db.whatsapp_group_invites.find({}).sort("created_at", -1).to_list(500)
+    for legacy in legacy_batch + legacy_invites:
+        result = legacy.get("result") or {}
+        sent_docs.append({
+            "_id": legacy.get("_id"),
+            "to": legacy.get("sent_to") or legacy.get("parent_whatsapp") or "",
+            "display_to": legacy.get("sent_to") or legacy.get("parent_whatsapp") or "",
+            "template": legacy.get("template", ""),
+            "params": legacy.get("params", []),
+            "result": result,
+            "message_ids": _whatsapp_response_message_ids(result),
+            "created_at": legacy.get("created_at", ""),
+            "status": "sent" if result.get("sent") else result.get("mode", "legacy"),
+            "source": "legacy_batch_whatsapp",
+        })
+    sent_docs.sort(key=lambda d: d.get("created_at") or "", reverse=True)
+    parsed_messages = await db.whatsapp_inbound_messages.find({}).sort("received_at", -1).to_list(2000)
+    parsed_statuses = await db.whatsapp_statuses.find({}).sort("received_at", -1).to_list(3000)
+    if not parsed_messages and not parsed_statuses:
+        event_docs = await db.whatsapp_events.find({}).sort("received_at", -1).to_list(2000)
+        for event in event_docs:
+            extracted = _extract_whatsapp_events(event.get("payload") or {})
+            for msg in extracted["messages"]:
+                msg["received_at"] = msg.get("received_at") or event.get("received_at")
+                parsed_messages.append(msg)
+            for status in extracted["statuses"]:
+                status["received_at"] = status.get("received_at") or event.get("received_at")
+                parsed_statuses.append(status)
+
+    items = []
+    for doc in sent_docs:
+        created_at = doc.get("created_at") or ""
+        if not _in_date_window(created_at, start_date, end_date):
+            continue
+        to_phone = doc.get("to") or ""
+        message_ids = set(doc.get("message_ids") or [])
+        statuses = [
+            s for s in parsed_statuses
+            if (s.get("message_id") in message_ids) or (to_phone and s.get("recipient_id") == to_phone)
+        ][:10]
+        responses = [
+            m for m in parsed_messages
+            if to_phone and m.get("from") == to_phone and (not m.get("received_at") or m.get("received_at") >= created_at)
+        ][:10]
+        item = serialize_doc(doc)
+        item["statuses"] = [serialize_doc(s) for s in statuses]
+        item["responses"] = [serialize_doc(m) for m in responses]
+        item["latest_status"] = statuses[0].get("status") if statuses else item.get("latest_status") or item.get("status")
+        item["response_count"] = len(responses)
+        items.append(item)
+
+    inbound_only = [
+        serialize_doc(m) for m in parsed_messages
+        if _in_date_window(m.get("received_at"), start_date, end_date)
+    ][:200]
+    dashboard = {
+        "sent": len(items),
+        "inbound": len(inbound_only),
+        "with_responses": len([m for m in items if m.get("response_count", 0) > 0]),
+        "failed": len([m for m in items if m.get("latest_status") == "failed" or m.get("status") == "failed"]),
+    }
+    return {"messages": items, "inbound": inbound_only, "dashboard": dashboard}
+
 # ---------------------------- WhatsApp Webhook ----------------------------
 @api.get("/whatsapp/webhook")
 async def whatsapp_webhook_verify(request: Request):
@@ -2005,16 +2498,19 @@ async def whatsapp_webhook_verify(request: Request):
 @api.post("/whatsapp/webhook")
 async def whatsapp_webhook_incoming(request: Request):
     """Handle incoming WhatsApp events (messages, statuses).
-    Stores inbound messages in db.whatsapp_events for future inbox view."""
+    Stores raw events plus normalized inbound replies and delivery statuses."""
     body = await request.json()
+    received_at = iso(now_utc())
     try:
-        await db.whatsapp_events.insert_one({
-            "received_at": iso(now_utc()),
+        res = await db.whatsapp_events.insert_one({
+            "received_at": received_at,
             "payload": body,
         })
+        parsed = await _persist_parsed_whatsapp_events(body, str(res.inserted_id), received_at)
     except Exception as e:
         logger.warning(f"failed to persist whatsapp event: {e}")
-    return {"status": "ok"}
+        parsed = {"inbound": 0, "statuses": 0}
+    return {"status": "ok", **parsed}
 
 # ---------------------------- Notification Self-Test ----------------------------
 class TestNotifyIn(BaseModel):
@@ -2113,6 +2609,11 @@ class KioskAction(BaseModel):
 
 def normalize_kiosk_code(code: str) -> str:
     raw = (code or "").strip().upper()
+    if raw.startswith("CKM-CHECKIN:"):
+        raw = raw.split(":", 1)[1].strip()
+    match = re.search(r"CKM-\d{3,}", raw)
+    if match:
+        return match.group(0)
     if raw.startswith("CKM-"):
         return raw
     digits = "".join(ch for ch in raw if ch.isdigit())
@@ -2483,6 +2984,7 @@ class RegistrationIn(BaseModel):
     full_name: str
     dob: Optional[str] = None
     gender: Optional[str] = None
+    photo_url: Optional[str] = None
     parent_name: str
     parent_whatsapp: str
     parent_email: Optional[EmailStr] = None
@@ -2504,6 +3006,22 @@ async def registration_meta():
         },
         "levels": [serialize_doc(l) for l in levels],
     }
+
+@api.post("/registrations/public/photo")
+async def upload_registration_photo(photo: UploadFile = File(...)):
+    """PUBLIC — upload a student photograph before submitting registration."""
+    if not (photo.content_type or "").startswith("image/"):
+        raise HTTPException(400, "Upload a JPG, PNG or WebP image")
+    raw = await photo.read()
+    if len(raw) > 3 * 1024 * 1024:
+        raise HTTPException(400, "Photo must be 3 MB or smaller")
+    STUDENT_PHOTO_DIR.mkdir(parents=True, exist_ok=True)
+    ext = _safe_upload_ext(photo.filename or "", photo.content_type or "")
+    filename = f"{uuid.uuid4().hex}{ext}"
+    path = STUDENT_PHOTO_DIR / filename
+    path.write_bytes(raw)
+    url_path = f"/uploads/student-photos/{filename}"
+    return {"photo_url": url_path, "absolute_url": public_file_url(url_path)}
 
 @api.post("/registrations")
 async def create_registration(payload: RegistrationIn):
@@ -2549,6 +3067,7 @@ async def confirm_registration(rid: str, payload: RegistrationConfirmIn,
         "full_name": reg["full_name"],
         "dob": reg.get("dob"),
         "gender": reg.get("gender") or "other",
+        "photo_url": reg.get("photo_url"),
         "parent_name": reg["parent_name"],
         "parent_whatsapp": reg["parent_whatsapp"],
         "parent_email": reg.get("parent_email"),
@@ -2657,6 +3176,8 @@ async def import_students(payload: StudentImportRow, user: dict = Depends(requir
 
 # ---------------------------- Mount ----------------------------
 app.include_router(api)
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 app.add_middleware(
     CORSMiddleware,

@@ -3,7 +3,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { Logo } from "@/components/Brand";
 import {
   LayoutDashboard, Users, Calendar, ClipboardCheck, GraduationCap,
-  ReceiptText, Settings, LogOut, FileText, ScanLine, Inbox
+  ReceiptText, Settings, LogOut, FileText, ScanLine, Inbox, MessageCircle, BarChart3
 } from "lucide-react";
 import { Toaster } from "@/components/ui/sonner";
 
@@ -16,12 +16,15 @@ const NAV = [
   { to: "/levels", label: "Levels & Fees", icon: GraduationCap, testid: "nav-levels" },
   { to: "/billing", label: "Billing", icon: ReceiptText, testid: "nav-billing" },
   { to: "/receipts", label: "Receipts", icon: FileText, testid: "nav-receipts" },
+  { to: "/whatsapp-messages", label: "WhatsApp", icon: MessageCircle, testid: "nav-whatsapp", directorOnly: true },
+  { to: "/reports", label: "Reports", icon: BarChart3, testid: "nav-reports", directorOnly: true },
   { to: "/settings", label: "Settings", icon: Settings, testid: "nav-settings" },
 ];
 
 export default function Layout() {
   const { user, logout } = useAuth();
   const nav = useNavigate();
+  const visibleNav = NAV.filter((item) => !item.directorOnly || user?.role === "director");
 
   return (
     <div className="min-h-screen flex" data-testid="app-shell">
@@ -30,7 +33,7 @@ export default function Layout() {
           <Logo light />
         </div>
         <nav className="flex-1 py-4 text-sm">
-          {NAV.map(({ to, label, icon: Icon, end, testid }) => (
+          {visibleNav.map(({ to, label, icon: Icon, end, testid }) => (
             <NavLink
               key={to}
               to={to}
@@ -96,7 +99,7 @@ export default function Layout() {
       </main>
       <nav className="md:hidden fixed bottom-0 inset-x-0 z-40 bg-[var(--ck-black)] text-white border-t border-white/10" data-testid="mobile-nav">
         <div className="flex overflow-x-auto mobile-nav-scroll px-2 py-2 gap-1">
-          {NAV.map(({ to, label, icon: Icon, end, testid }) => (
+          {visibleNav.map(({ to, label, icon: Icon, end, testid }) => (
             <NavLink
               key={to}
               to={to}
