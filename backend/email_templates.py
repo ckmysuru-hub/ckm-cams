@@ -168,6 +168,20 @@ EMAIL_TEMPLATES = {
     </p>
         """,
     },
+    "invoice_created": {
+        "subject": "{academy_name} - Invoice Created - {invoice_no}",
+        "html": """
+            <p>Dear Parent,</p>
+            <p>This is to inform you that invoice <b>{invoice_no}</b> for <b>{student_name}'s</b> chess classes has been created.</p>
+            <p>Balance due: <b>{balance}</b>. Due date: <b>{due_date}</b>.</p>
+            <p><a href="{invoice_pdf_url}">View invoice PDF</a></p>
+                <p>
+        Warm Regards,<br>
+        <strong> {academy_name}</strong><br>
+        +91 89516 61957
+    </p>
+        """,
+    },
     "payment_receipt": {
         "subject": "Payment Receipt {receipt_no}",
         "html": """

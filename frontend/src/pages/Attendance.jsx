@@ -9,9 +9,6 @@ import { toast } from "sonner";
 const OPTIONS = [
   { v: "P", label: "Present" },
   { v: "A", label: "Absent" },
-  { v: "LT", label: "Late" },
-  { v: "L", label: "Leave" },
-  { v: "H", label: "Holiday" },
 ];
 
 export default function Attendance() {

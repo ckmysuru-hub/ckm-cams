@@ -171,7 +171,7 @@ export default function StudentDetail() {
       />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
-        <Stat label="Attendance" value={att ? `${att.percentage}%` : "—"} hint={`P ${att?.counts.P||0} · A ${att?.counts.A||0} · LT ${att?.counts.LT||0}`} />
+        <Stat label="Attendance" value={att ? `${att.percentage}%` : "—"} hint={`P ${att?.counts.P||0} · A ${att?.counts.A||0} `} />
         <Stat label="Total Billed" value={fmtINR(inv.reduce((a,b)=>a+b.amount,0))} hint={`${inv.length} invoices`} />
         <Stat label="Pending" value={fmtINR(inv.reduce((a,b)=>a+b.balance,0))} hint="balance outstanding" accent />
       </div>

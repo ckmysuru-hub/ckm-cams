@@ -281,12 +281,12 @@ class LevelIn(BaseModel):
     status: str = "active"
 
 class AttendanceMark(BaseModel):
-    status: Literal["P", "A", "L", "LT", "H"]
+    status: Literal["P", "A"]
 
 class AttendanceSessionIn(BaseModel):
     batch_id: str
     session_date: str  # YYYY-MM-DD
-    marks: dict  # {student_id: "P"|"A"|"L"|"LT"|"H"}
+    marks: dict  # {student_id: "P"|"A"}
     coach_id: Optional[str] = None
     topic: Optional[str] = ""
 
@@ -568,6 +568,23 @@ def send_fee_reminder_whatsapp(to_phone: str, invoice: dict) -> dict:
         [
             invoice.get("invoice_no", ""),
             invoice.get("student_name", ""),
+            money_text(invoice.get("balance", 0)),
+            invoice.get("due_date", ""),
+            invoice_pdf_url,
+        ],
+    )
+
+def send_invoice_created_whatsapp(to_phone: str, invoice: dict) -> dict:
+    template_name = os.environ.get("WHATSAPP_INVOICE_CREATED_TEMPLATE", "invoice_created")
+    invoice_pdf_url = portal_pdf_url(str(invoice.get("student_id", "")), "invoice", str(invoice.get("_id", "")))
+    return send_whatsapp_template(
+        to_phone,
+        template_name,
+        whatsapp_template_language(),
+        [
+            
+            invoice.get("student_name", ""),
+            invoice.get("invoice_no", ""),
             money_text(invoice.get("balance", 0)),
             invoice.get("due_date", ""),
             invoice_pdf_url,
@@ -1176,7 +1193,7 @@ async def student_attendance(sid: str, user: dict = Depends(get_current_user)):
     batch_id = student.get("batch_id")
     sessions = await db.attendance.find({"batch_id": batch_id}).sort("session_date", -1).limit(100).to_list(100)
     history = []
-    counts = {"P": 0, "A": 0, "L": 0, "LT": 0, "H": 0}
+    counts = {"P": 0, "A": 0}
     for s in sessions:
         st = s.get("marks", {}).get(sid)
         if st:
@@ -1188,7 +1205,7 @@ async def student_attendance(sid: str, user: dict = Depends(get_current_user)):
                 "coach_id": s.get("coach_id"),
                 "coach_name": s.get("coach_name", ""),
             })
-    total_sessions = sum(counts[k] for k in ["P", "A", "L", "LT"])
+    total_sessions = sum(counts[k] for k in ["P", "A"])
     pct = round((counts["P"] + counts["LT"]) / total_sessions * 100, 1) if total_sessions else 0
     return {"counts": counts, "history": history, "percentage": pct}
 
@@ -1220,8 +1237,17 @@ async def _build_invoice_doc(payload: InvoiceIn, user: dict) -> dict:
 
 def _send_invoice_created_notifications(inv: dict) -> None:
     if inv.get("parent_whatsapp"):
-        send_named_whatsapp_template(inv["parent_whatsapp"], "invoice_created",
-                                     [inv["invoice_no"], inv["student_name"], money_text(inv["amount"]), inv["due_date"]])
+        send_invoice_created_whatsapp(inv["parent_whatsapp"],inv)
+    if inv.get("parent_email"):
+        invoice_pdf_url = portal_pdf_url(str(inv.get("student_id", "")), "invoice", str(inv.get("_id", "")))
+        send_template_email(inv["parent_email"], "invoice_created", {
+            "invoice_no": inv["invoice_no"],
+            "student_name": inv.get("student_name", ""),
+            "balance": money_text(inv.get("balance", 0)),
+            "due_date": inv.get("due_date", ""),
+            "invoice_pdf_url": invoice_pdf_url,
+        })
+        
 
 async def _create_plan_invoice_for_student(student: dict, level: dict, period: str, due_date: str,
                                            user: dict, notes: str = "",
@@ -1249,7 +1275,9 @@ async def _create_plan_invoice_for_student(student: dict, level: dict, period: s
 
 async def create_subscription_renewal_invoices(target_date: Optional[date] = None) -> dict:
     target = target_date or (date.today() + timedelta(days=1))
+    target_due = target + timedelta(days=5)
     target_iso = target.isoformat()
+    target_due_iso = target_due.isoformat()
     system_user = {"id": "system:auto-subscription-renewal"}
     students = await db.students.find({
         "status": "active",
@@ -1274,7 +1302,7 @@ async def create_subscription_renewal_invoices(target_date: Optional[date] = Non
                 student,
                 level,
                 period=f"Renewal {target_iso}",
-                due_date=target_iso,
+                due_date=target_due_iso,
                 user=system_user,
                 notes="Auto-generated 1 day before subscription end",
                 auto_subscription_end=target_iso,
@@ -2261,7 +2289,7 @@ async def portal_data(token: str):
         {"batch_id": batch_id},
         {"marks": 1, "session_date": 1, "topic": 1, "coach_id": 1, "coach_name": 1},
     ).sort("session_date", -1).limit(60).to_list(60) if batch_id else []
-    counts = {"P": 0, "A": 0, "L": 0, "LT": 0, "H": 0}
+    counts = {"P": 0, "A": 0}
     history = []
     for sess in sessions:
         st = (sess.get("marks") or {}).get(sid_str)
