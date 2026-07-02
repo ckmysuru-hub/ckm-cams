@@ -82,9 +82,7 @@ export default function ParentPortal() {
             {attendance.history.map((h, i) => (
               <div key={i} className={`px-2.5 py-1 rounded-md text-[11px] font-mono ${
                 h.status === "P" ? "bg-green-50 text-green-700" :
-                h.status === "LT" ? "bg-orange-50 text-orange-700" :
                 h.status === "A" ? "bg-red-50 text-red-700" :
-                h.status === "H" ? "bg-violet-50 text-violet-700" :
                 "bg-slate-50 text-slate-600"
               }`}>
                 {h.date.slice(5)} · {h.status}
