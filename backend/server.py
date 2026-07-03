@@ -630,8 +630,7 @@ def public_backend_url() -> str:
 
 def portal_pdf_url(student_id: str, doc_type: Literal["invoice", "receipt"], doc_id: str) -> str:
     token, _ = _portal_token(student_id)
-    return f"{public_backend_url()}/api/portal/{quote(token, safe='')}/{doc_type}/{doc_id}/pdf"
-
+    return f"{public_backend_url()}/api/portal/{token}/{doc_type}/{doc_id}/pdf"
 
 UPI_PAYMENT_TEMPLATE = "upi://pay?mc=8299&pa=yespay.bizsbiz14832@yesbankltd&pn=MEGHANA MOHAN .B&am={amount}"
 
