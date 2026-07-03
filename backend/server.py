@@ -12,6 +12,8 @@ import asyncio
 import logging
 import secrets
 import re
+import hmac
+import hashlib
 from datetime import datetime, timezone, timedelta, date
 from typing import List, Optional, Literal
 
@@ -168,6 +170,12 @@ def serialize_doc(doc: dict) -> dict:
     if "_id" in doc:
         doc["id"] = str(doc.pop("_id"))
     return doc
+
+def _doc_id(doc: dict) -> str:
+    """Return a document's id whether it's a raw Mongo doc (_id) or an
+    already-serialized one (id) - several notification helpers get passed
+    either shape depending on the call site."""
+    return str((doc or {}).get("id") or (doc or {}).get("_id") or "")
 
 def public_file_url(path: str) -> str:
     return f"{public_backend_url()}{path}"
@@ -638,6 +646,109 @@ async def portal_pdf_url(student_id: str, doc_type: Literal["invoice", "receipt"
     token, _ = await get_or_create_portal_token(student_id)
     return f"{public_backend_url()}/api/portal/{token}/{doc_type}/{doc_id}/pdf"
 
+# ---------------------------- Razorpay Payment Links ----------------------------
+RAZORPAY_API_BASE = "https://api.razorpay.com/v1"
+
+def razorpay_enabled() -> bool:
+    return bool(os.environ.get("RAZORPAY_KEY_ID") and os.environ.get("RAZORPAY_KEY_SECRET"))
+
+def _razorpay_auth() -> tuple[str, str]:
+    return os.environ.get("RAZORPAY_KEY_ID", ""), os.environ.get("RAZORPAY_KEY_SECRET", "")
+
+async def _cancel_razorpay_payment_link(link_id: str) -> None:
+    """Best-effort cancel of a stale/superseded payment link. Never raises."""
+    if not (razorpay_enabled() and link_id):
+        return
+    try:
+        requests.post(
+            f"{RAZORPAY_API_BASE}/payment_links/{link_id}/cancel",
+            auth=_razorpay_auth(), timeout=10,
+        )
+    except Exception as e:
+        logger.warning(f"Razorpay payment link cancel failed for {link_id}: {e}")
+
+async def get_or_create_payment_link(invoice: dict) -> Optional[dict]:
+    """Return {"url": ..., "id": ...} for the given invoice's outstanding balance,
+    reusing the previously issued Razorpay payment link as long as it still matches
+    the current balance and hasn't been paid/expired/cancelled. If the balance has
+    since changed (e.g. a partial cash payment came in), the stale link is cancelled
+    and a fresh one is minted for the new amount.
+
+    Returns None (and leaves the invoice untouched) if Razorpay isn't configured or
+    the invoice has no balance left to collect - notifications simply omit the link
+    in that case, same log-only fallback pattern used for WhatsApp/email.
+    """
+    if not razorpay_enabled():
+        return None
+    balance = round(float(invoice.get("balance", 0) or 0), 2)
+    if balance <= 0:
+        return None
+
+    iid = str(invoice.get("_id") or invoice.get("id") or "")
+    if not iid:
+        return None
+
+    existing_id = invoice.get("razorpay_payment_link_id")
+    existing_url = invoice.get("razorpay_payment_link_url")
+    existing_amount = invoice.get("razorpay_payment_link_amount")
+    existing_status = invoice.get("razorpay_payment_link_status")
+    if (existing_id and existing_url and existing_status in ("created", "partially_paid")
+            and existing_amount is not None and round(float(existing_amount), 2) == balance):
+        return {"url": existing_url, "id": existing_id}
+
+    if existing_id and existing_status not in (None, "paid"):
+        await _cancel_razorpay_payment_link(existing_id)
+
+    student_name = invoice.get("student_name") or ""
+    parent_email = invoice.get("parent_email") or None
+    parent_phone = (invoice.get("parent_whatsapp") or "").replace(" ", "").replace("-", "") or None
+    academy_name = os.environ.get("ACADEMY_NAME", "Chess Klub Mysuru")
+
+    body = {
+        "amount": int(round(balance * 100)),
+        "currency": "INR",
+        "accept_partial": False,
+        "description": f"{academy_name} - Invoice {invoice.get('invoice_no', '')} ({student_name})",
+        "customer": {k: v for k, v in {
+            "name": student_name, "email": parent_email, "contact": parent_phone,
+        }.items() if v},
+        "notify": {"sms": False, "email": False},  # we send our own branded notifications
+        "reminder_enable": False,
+        "reference_id": f"{iid}-{uuid.uuid4().hex[:8]}",
+        "notes": {
+            "invoice_id": iid,
+            "invoice_no": invoice.get("invoice_no", ""),
+            "student_id": str(invoice.get("student_id", "")),
+        },
+    }
+    try:
+        r = requests.post(f"{RAZORPAY_API_BASE}/payment_links", auth=_razorpay_auth(), json=body, timeout=15)
+        data = r.json()
+        if not r.ok:
+            logger.warning(f"Razorpay payment link creation failed [{r.status_code}]: {data}")
+            return None
+    except Exception as e:
+        logger.warning(f"Razorpay payment link creation exception: {e}")
+        return None
+
+    link_id = data.get("id")
+    short_url = data.get("short_url")
+    if not (link_id and short_url):
+        logger.warning(f"Razorpay payment link response missing id/short_url: {data}")
+        return None
+
+    await db.invoices.update_one(
+        {"_id": oid(iid)},
+        {"$set": {
+            "razorpay_payment_link_id": link_id,
+            "razorpay_payment_link_url": short_url,
+            "razorpay_payment_link_amount": balance,
+            "razorpay_payment_link_status": data.get("status", "created"),
+            "razorpay_payment_link_created_at": iso(now_utc()),
+        }},
+    )
+    return {"url": short_url, "id": link_id}
+
 UPI_PAYMENT_TEMPLATE = "upi://pay?mc=8299&pa=yespay.bizsbiz14832@yesbankltd&pn=MEGHANA MOHAN .B&am={amount}"
 
 
@@ -646,9 +757,9 @@ def invoice_upi_url(invoice: dict) -> str:
     return UPI_PAYMENT_TEMPLATE.format(amount=amount)
 
 
-async def send_fee_reminder_whatsapp(to_phone: str, invoice: dict) -> dict:
+async def send_fee_reminder_whatsapp(to_phone: str, invoice: dict, payment_link_url: str = "") -> dict:
     template_name = os.environ.get("WHATSAPP_FEE_REMINDER_TEMPLATE", "fee_reminder")
-    invoice_pdf_url = await portal_pdf_url(str(invoice.get("student_id", "")), "invoice", str(invoice.get("_id", "")))
+    invoice_pdf_url = await portal_pdf_url(str(invoice.get("student_id", "")), "invoice", _doc_id(invoice))
     return send_whatsapp_template(
         to_phone,
         template_name,
@@ -659,12 +770,13 @@ async def send_fee_reminder_whatsapp(to_phone: str, invoice: dict) -> dict:
             money_text(invoice.get("balance", 0)),
             invoice.get("due_date", ""),
             invoice_pdf_url,
+            payment_link_url,
         ],
     )
 
-async def send_invoice_created_whatsapp(to_phone: str, invoice: dict) -> dict:
+async def send_invoice_created_whatsapp(to_phone: str, invoice: dict, payment_link_url: str = "") -> dict:
     template_name = os.environ.get("WHATSAPP_INVOICE_CREATED_TEMPLATE", "invoice_created")
-    invoice_pdf_url = await portal_pdf_url(str(invoice.get("student_id", "")), "invoice", str(invoice.get("_id", "")))
+    invoice_pdf_url = await portal_pdf_url(str(invoice.get("student_id", "")), "invoice", _doc_id(invoice))
     return send_whatsapp_template(
         to_phone,
         template_name,
@@ -676,6 +788,7 @@ async def send_invoice_created_whatsapp(to_phone: str, invoice: dict) -> dict:
             money_text(invoice.get("balance", 0)),
             invoice.get("due_date", ""),
             invoice_pdf_url,
+            payment_link_url,
         ],
     )
 
@@ -696,10 +809,25 @@ async def send_payment_receipt_whatsapp(to_phone: str, invoice: dict, receipt: d
     )
 
 
-def send_template_email(to_email: str, template_key: str, context: dict, attachments: Optional[List[dict]] = None) -> dict:
+def send_template_email(to_email: str, template_key: str, context: dict,
+                        attachments: Optional[List[dict]] = None,
+                        raw_context: Optional[dict] = None) -> dict:
     context = {"academy_name": os.environ.get("ACADEMY_NAME", "Chess Klub Mysuru"), **context}
-    subject, html = render_email_template(template_key, context)
+    subject, html = render_email_template(template_key, context, raw_context)
     return send_email(to_email, subject, html, attachments=attachments)
+
+
+def _payment_button_html(url: Optional[str]) -> str:
+    """A small styled 'Pay Online Now' button, or '' if there's no active
+    payment link for this invoice (Razorpay not configured, or nothing left
+    to collect)."""
+    if not url:
+        return ""
+    return (
+        f'<p style="margin:16px 0;"><a href="{url}" '
+        'style="display:inline-block;background:#ea580c;color:#ffffff;padding:10px 20px;'
+        'border-radius:6px;text-decoration:none;font-weight:bold;">Pay Online Now</a></p>'
+    )
 
 
 async def existing_attendance_for_student(student_id: str, session_date: str, batch_id: Optional[str] = None) -> Optional[dict]:
@@ -1449,17 +1577,19 @@ async def _build_invoice_doc(payload: InvoiceIn, user: dict) -> dict:
     return inv
 
 async def _send_invoice_created_notifications(inv: dict) -> None:
+    link = await get_or_create_payment_link(inv)
+    link_url = (link or {}).get("url", "")
     if inv.get("parent_whatsapp"):
-        await send_invoice_created_whatsapp(inv["parent_whatsapp"],inv)
+        await send_invoice_created_whatsapp(inv["parent_whatsapp"], inv, link_url)
     if inv.get("parent_email"):
-        invoice_pdf_url = await portal_pdf_url(str(inv.get("student_id", "")), "invoice", str(inv.get("_id", "")))
+        invoice_pdf_url = await portal_pdf_url(str(inv.get("student_id", "")), "invoice", _doc_id(inv))
         send_template_email(inv["parent_email"], "invoice_created", {
             "invoice_no": inv["invoice_no"],
             "student_name": inv.get("student_name", ""),
             "balance": money_text(inv.get("balance", 0)),
             "due_date": inv.get("due_date", ""),
             "invoice_pdf_url": invoice_pdf_url,
-        })
+        }, raw_context={"payment_button": _payment_button_html(link_url)})
         
 
 async def _create_plan_invoice_for_student(student: dict, level: dict, period: str, due_date: str,
@@ -1600,17 +1730,19 @@ async def remind_invoice(iid: str, user: dict = Depends(require_role("finance", 
     if inv.get("status") == "cancelled":
         raise HTTPException(400, "Reminder cannot be sent for a cancelled invoice.")
     wa_result = email_result = None
+    link = await get_or_create_payment_link(inv)
+    link_url = (link or {}).get("url", "")
     if inv.get("parent_whatsapp"):
-        wa_result = await send_fee_reminder_whatsapp(inv["parent_whatsapp"], inv)
+        wa_result = await send_fee_reminder_whatsapp(inv["parent_whatsapp"], inv, link_url)
     if inv.get("parent_email"):
-        invoice_pdf_url = await portal_pdf_url(str(inv.get("student_id", "")), "invoice", str(inv.get("_id", "")))
+        invoice_pdf_url = await portal_pdf_url(str(inv.get("student_id", "")), "invoice", _doc_id(inv))
         email_result = send_template_email(inv["parent_email"], "payment_reminder", {
             "invoice_no": inv["invoice_no"],
             "student_name": inv.get("student_name", ""),
             "balance": money_text(inv.get("balance", 0)),
             "due_date": inv.get("due_date", ""),
             "invoice_pdf_url": invoice_pdf_url,
-        })
+        }, raw_context={"payment_button": _payment_button_html(link_url)})
     reminder_entry = {
         "sent_at": iso(now_utc()),
         "sent_by": user.get("id"),
@@ -1626,6 +1758,67 @@ async def remind_invoice(iid: str, user: dict = Depends(require_role("finance", 
     )
     return {"whatsapp": wa_result, "email": email_result, "reminder_count": int(inv.get("reminder_count", 0) or 0) + 1}
 
+async def _apply_invoice_payment(inv: dict, amount: float, mode: str, transaction_ref: str,
+                                 received_by: str, paid_at: Optional[str] = None) -> dict:
+    """Record a payment against an invoice: creates the receipt, updates the
+    invoice's paid/balance/status, extends the student's subscription, sends
+    the payment-receipt notifications, and - if the invoice is now fully paid -
+    cancels any still-open Razorpay payment link so it can't be paid twice.
+    Shared by the manual /payments endpoint and the Razorpay webhook so both
+    paths behave identically."""
+    invoice_id = str(inv.get("id") or inv["_id"])
+    new_paid = round(float(inv.get("paid", 0)) + float(amount), 2)
+    new_balance = round(float(inv["amount"]) - new_paid, 2)
+    status = "paid" if new_balance <= 0.01 else "partial"
+    receipt_no = await gen_receipt_no()
+    receipt = {
+        "receipt_no": receipt_no,
+        "invoice_id": invoice_id,
+        "invoice_no": inv["invoice_no"],
+        "student_id": inv["student_id"],
+        "student_code": inv.get("student_code"),
+        "student_name": inv.get("student_name"),
+        "period": inv.get("period"),
+        "items": inv.get("items", []),
+        "amount": amount,
+        "mode": mode,
+        "transaction_ref": transaction_ref or "",
+        "previous_balance": float(inv["balance"]),
+        "remaining_balance": new_balance,
+        "received_by": received_by,
+        "paid_at": paid_at or iso(now_utc()),
+        "created_at": iso(now_utc()),
+    }
+    r = await db.receipts.insert_one(receipt)
+    invoice_updates = {"paid": new_paid, "balance": new_balance, "status": status}
+    if status == "paid":
+        invoice_updates["razorpay_payment_link_status"] = "paid"
+    await db.invoices.update_one({"_id": oid(invoice_id)}, {"$set": invoice_updates})
+    saved = serialize_doc({**receipt, "_id": r.inserted_id})
+
+    # Extend subscription based on the student's payment plan
+    student_doc = await db.students.find_one({"_id": oid(inv["student_id"])})
+    plan = (student_doc or {}).get("payment_plan", "monthly") if student_doc else "monthly"
+    sub = await _extend_subscription(inv["student_id"], plan)
+    saved["subscription"] = sub
+
+    if status == "paid" and inv.get("razorpay_payment_link_id"):
+        await _cancel_razorpay_payment_link(inv["razorpay_payment_link_id"])
+
+    if inv.get("parent_whatsapp"):
+        await send_payment_receipt_whatsapp(inv["parent_whatsapp"], inv, saved)
+    if inv.get("parent_email"):
+        invoice_pdf_url = await portal_pdf_url(str(inv.get("student_id", "")), "invoice", invoice_id)
+        receipt_pdf_url = await portal_pdf_url(str(saved.get("student_id", "")), "receipt", _doc_id(saved))
+        send_template_email(inv["parent_email"], "payment_receipt", {
+            "receipt_no": receipt_no,
+            "amount": money_text(amount),
+            "invoice_no": inv["invoice_no"],
+            "invoice_pdf_url": invoice_pdf_url,
+            "receipt_pdf_url": receipt_pdf_url,
+        })
+    return saved
+
 @api.post("/payments")
 async def record_payment(payload: PaymentIn, user: dict = Depends(require_role("finance", "ops_manager", "front_desk"))):
     inv = await db.invoices.find_one({"_id": oid(payload.invoice_id)})
@@ -1636,50 +1829,10 @@ async def record_payment(payload: PaymentIn, user: dict = Depends(require_role("
         raise HTTPException(400, "Cannot record payment against a cancelled invoice")
     if payload.amount <= 0:
         raise HTTPException(400, "Amount must be > 0")
-    new_paid = round(float(inv.get("paid", 0)) + float(payload.amount), 2)
-    new_balance = round(float(inv["amount"]) - new_paid, 2)
-    status = "paid" if new_balance <= 0.01 else "partial"
-    receipt_no = await gen_receipt_no()
-    receipt = {
-        "receipt_no": receipt_no,
-        "invoice_id": payload.invoice_id,
-        "invoice_no": inv["invoice_no"],
-        "student_id": inv["student_id"],
-        "student_code": inv.get("student_code"),
-        "student_name": inv.get("student_name"),
-        "period": inv.get("period"),
-        "items": inv.get("items", []),
-        "amount": payload.amount,
-        "mode": payload.mode,
-        "transaction_ref": payload.transaction_ref or "",
-        "previous_balance": float(inv["balance"]),
-        "remaining_balance": new_balance,
-        "received_by": payload.received_by or user.get("name"),
-        "paid_at": payload.paid_at or iso(now_utc()),
-        "created_at": iso(now_utc()),
-    }
-    r = await db.receipts.insert_one(receipt)
-    await db.invoices.update_one({"_id": oid(payload.invoice_id)},
-                                 {"$set": {"paid": new_paid, "balance": new_balance, "status": status}})
-    saved = serialize_doc({**receipt, "_id": r.inserted_id})
-    # Extend subscription based on the student's payment plan
-    student_doc = await db.students.find_one({"_id": oid(inv["student_id"])})
-    plan = (student_doc or {}).get("payment_plan", "monthly") if student_doc else "monthly"
-    sub = await _extend_subscription(inv["student_id"], plan)
-    saved["subscription"] = sub
-    if inv.get("parent_whatsapp"):
-        await send_payment_receipt_whatsapp(inv["parent_whatsapp"], inv, saved)
-    if inv.get("parent_email"):
-        invoice_pdf_url = await portal_pdf_url(str(inv.get("student_id", "")), "invoice", str(inv.get("_id", "")))
-        receipt_pdf_url = await portal_pdf_url(str(saved.get("student_id", "")), "receipt", str(saved.get("id", "")))
-        send_template_email(inv["parent_email"], "payment_receipt", {
-            "receipt_no": receipt_no,
-            "amount": money_text(payload.amount),
-            "invoice_no": inv["invoice_no"],
-            "invoice_pdf_url": invoice_pdf_url,
-            "receipt_pdf_url": receipt_pdf_url,
-        })
-    return saved
+    return await _apply_invoice_payment(
+        inv, payload.amount, payload.mode, payload.transaction_ref or "",
+        payload.received_by or user.get("name"), payload.paid_at,
+    )
 
 @api.get("/receipts")
 async def list_receipts(student_id: Optional[str] = None, user: dict = Depends(get_current_user)):
@@ -2692,6 +2845,61 @@ async def whatsapp_webhook_incoming(request: Request):
         logger.warning(f"failed to persist whatsapp event: {e}")
         parsed = {"inbound": 0, "statuses": 0}
     return {"status": "ok", **parsed}
+
+# ---------------------------- Razorpay Webhook ----------------------------
+@api.post("/webhooks/razorpay")
+async def razorpay_webhook(request: Request):
+    """Receives Razorpay payment-link events and marks the matching invoice as
+    paid automatically. Configure this URL (…/api/webhooks/razorpay) plus the
+    'payment_link.paid' event in Razorpay Dashboard → Settings → Webhooks, and
+    put the webhook secret you set there into RAZORPAY_WEBHOOK_SECRET."""
+    raw_body = await request.body()
+    secret = os.environ.get("RAZORPAY_WEBHOOK_SECRET")
+    signature = request.headers.get("X-Razorpay-Signature", "")
+    if not secret:
+        logger.warning("Razorpay webhook received but RAZORPAY_WEBHOOK_SECRET is not configured")
+        raise HTTPException(503, "Webhook not configured")
+    expected_sig = hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected_sig, signature or ""):
+        raise HTTPException(400, "Invalid webhook signature")
+
+    body = await request.json()
+    event = body.get("event")
+    await db.razorpay_events.insert_one({"event": event, "received_at": iso(now_utc()), "payload": body})
+
+    if event not in ("payment_link.paid", "payment.captured"):
+        return {"status": "ignored", "event": event}
+
+    link_entity = ((body.get("payload") or {}).get("payment_link") or {}).get("entity") or {}
+    payment_entity = ((body.get("payload") or {}).get("payment") or {}).get("entity") or {}
+    invoice_id = (link_entity.get("notes") or {}).get("invoice_id") or (payment_entity.get("notes") or {}).get("invoice_id")
+    razorpay_payment_id = payment_entity.get("id")
+    amount_paise = payment_entity.get("amount") or link_entity.get("amount_paid") or link_entity.get("amount")
+
+    if not invoice_id or not razorpay_payment_id or not amount_paise:
+        logger.warning(f"Razorpay webhook missing invoice_id/payment_id/amount: {body}")
+        return {"status": "ignored", "reason": "incomplete_payload"}
+
+    # Idempotency: Razorpay can (and will) redeliver the same event.
+    if await db.receipts.find_one({"transaction_ref": razorpay_payment_id, "mode": "razorpay"}):
+        return {"status": "ok", "already_processed": True}
+
+    try:
+        inv = await db.invoices.find_one({"_id": oid(invoice_id)})
+    except HTTPException:
+        inv = None
+    if not inv:
+        logger.warning(f"Razorpay webhook: invoice {invoice_id} not found")
+        return {"status": "ignored", "reason": "invoice_not_found"}
+    if inv.get("status") in ("paid", "cancelled") or float(inv.get("balance", 0) or 0) <= 0:
+        return {"status": "ok", "already_settled": True}
+
+    amount_rupees = round(float(amount_paise) / 100.0, 2)
+    await _apply_invoice_payment(
+        inv, amount_rupees, "razorpay", razorpay_payment_id,
+        "Razorpay (online payment)", iso(now_utc()),
+    )
+    return {"status": "ok"}
 
 # ---------------------------- Notification Self-Test ----------------------------
 class TestNotifyIn(BaseModel):

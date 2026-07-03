@@ -61,7 +61,7 @@ EMAIL_TEMPLATES = {
 
     <hr>
 
-    <p>Also, please find <a href="https://drive.google.com/drive/folders/1OJObwgqvIuT7g3KuZzjx_JwyXejoxAAG"> attached guidelines </a> for the classes. Kindly read through and acknowledge the same, no response to this email will be assumed and considered as an acknowledgment to all the messages and no questions. </p>
+    <p>Also, please find attached guidelines for the classes. Kindly read through and acknowledge the same. No response to this email will be assumed and considered as an acknowledgment to all the[...]
 
     <p>Have a great day!</p>
 
@@ -161,6 +161,7 @@ EMAIL_TEMPLATES = {
             <p>This is a reminder for invoice <b>{invoice_no}</b> for <b>{student_name}</b>.</p>
             <p>Balance due: <b>{balance}</b>. Due date: <b>{due_date}</b>.</p>
             <p><a href="{invoice_pdf_url}">View invoice PDF</a></p>
+            {payment_button}
                 <p>
         Warm Regards,<br>
         <strong> {academy_name}</strong><br>
@@ -175,6 +176,7 @@ EMAIL_TEMPLATES = {
             <p>This is to inform you that invoice <b>{invoice_no}</b> for <b>{student_name}'s</b> chess classes has been created.</p>
             <p>Balance due: <b>{balance}</b>. Due date: <b>{due_date}</b>.</p>
             <p><a href="{invoice_pdf_url}">View invoice PDF</a></p>
+            {payment_button}
                 <p>
         Warm Regards,<br>
         <strong> {academy_name}</strong><br>
@@ -240,7 +242,12 @@ EMAIL_TEMPLATES = {
 }
 
 
-def render_email_template(name: str, context: dict) -> tuple[str, str]:
+def render_email_template(name: str, context: dict, raw_context: dict = None) -> tuple[str, str]:
     template = EMAIL_TEMPLATES[name]
     safe_context = SafeTemplateContext({k: escape(str(v if v is not None else "")) for k, v in context.items()})
+    if raw_context:
+        # Values here are pre-built by our own server code (e.g. a styled payment
+        # button pointing at a Razorpay link we just created) - not user input -
+        # so they're inserted as-is instead of HTML-escaped.
+        safe_context.update(raw_context)
     return template["subject"].format_map(safe_context), template["html"].format_map(safe_context)
