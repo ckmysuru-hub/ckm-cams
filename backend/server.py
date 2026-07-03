@@ -628,8 +628,8 @@ def public_backend_url() -> str:
     ).rstrip("/")
 
 
-def portal_pdf_url(student_id: str, doc_type: Literal["invoice", "receipt"], doc_id: str) -> str:
-    token, _ = _portal_token(student_id)
+async def portal_pdf_url(student_id: str, doc_type: Literal["invoice", "receipt"], doc_id: str) -> str:
+    token, _ = await get_or_create_portal_token(student_id)
     return f"{public_backend_url()}/api/portal/{token}/{doc_type}/{doc_id}/pdf"
 
 UPI_PAYMENT_TEMPLATE = "upi://pay?mc=8299&pa=yespay.bizsbiz14832@yesbankltd&pn=MEGHANA MOHAN .B&am={amount}"
@@ -640,9 +640,9 @@ def invoice_upi_url(invoice: dict) -> str:
     return UPI_PAYMENT_TEMPLATE.format(amount=amount)
 
 
-def send_fee_reminder_whatsapp(to_phone: str, invoice: dict) -> dict:
+async def send_fee_reminder_whatsapp(to_phone: str, invoice: dict) -> dict:
     template_name = os.environ.get("WHATSAPP_FEE_REMINDER_TEMPLATE", "fee_reminder")
-    invoice_pdf_url = portal_pdf_url(str(invoice.get("student_id", "")), "invoice", str(invoice.get("_id", "")))
+    invoice_pdf_url = await portal_pdf_url(str(invoice.get("student_id", "")), "invoice", str(invoice.get("_id", "")))
     return send_whatsapp_template(
         to_phone,
         template_name,
@@ -656,9 +656,9 @@ def send_fee_reminder_whatsapp(to_phone: str, invoice: dict) -> dict:
         ],
     )
 
-def send_invoice_created_whatsapp(to_phone: str, invoice: dict) -> dict:
+async def send_invoice_created_whatsapp(to_phone: str, invoice: dict) -> dict:
     template_name = os.environ.get("WHATSAPP_INVOICE_CREATED_TEMPLATE", "invoice_created")
-    invoice_pdf_url = portal_pdf_url(str(invoice.get("student_id", "")), "invoice", str(invoice.get("_id", "")))
+    invoice_pdf_url = await portal_pdf_url(str(invoice.get("student_id", "")), "invoice", str(invoice.get("_id", "")))
     return send_whatsapp_template(
         to_phone,
         template_name,
@@ -674,9 +674,9 @@ def send_invoice_created_whatsapp(to_phone: str, invoice: dict) -> dict:
     )
 
 
-def send_payment_receipt_whatsapp(to_phone: str, invoice: dict, receipt: dict) -> dict:
+async def send_payment_receipt_whatsapp(to_phone: str, invoice: dict, receipt: dict) -> dict:
     template_name = os.environ.get("WHATSAPP_PAYMENT_RECEIPT_TEMPLATE", "payment_receipt")
-    receipt_pdf_url = portal_pdf_url(str(receipt.get("student_id", "")), "receipt", str(receipt.get("id", receipt.get("_id", ""))))
+    receipt_pdf_url = await portal_pdf_url(str(receipt.get("student_id", "")), "receipt", str(receipt.get("id", receipt.get("_id", ""))))
     return send_whatsapp_template(
         to_phone,
         template_name,
@@ -1392,11 +1392,11 @@ async def _build_invoice_doc(payload: InvoiceIn, user: dict) -> dict:
     }
     return inv
 
-def _send_invoice_created_notifications(inv: dict) -> None:
+async def _send_invoice_created_notifications(inv: dict) -> None:
     if inv.get("parent_whatsapp"):
-        send_invoice_created_whatsapp(inv["parent_whatsapp"],inv)
+        await send_invoice_created_whatsapp(inv["parent_whatsapp"],inv)
     if inv.get("parent_email"):
-        invoice_pdf_url = portal_pdf_url(str(inv.get("student_id", "")), "invoice", str(inv.get("_id", "")))
+        invoice_pdf_url = await portal_pdf_url(str(inv.get("student_id", "")), "invoice", str(inv.get("_id", "")))
         send_template_email(inv["parent_email"], "invoice_created", {
             "invoice_no": inv["invoice_no"],
             "student_name": inv.get("student_name", ""),
@@ -1466,7 +1466,7 @@ async def create_subscription_renewal_invoices(target_date: Optional[date] = Non
             )
             res = await db.invoices.insert_one(inv)
             saved = serialize_doc({**inv, "_id": res.inserted_id})
-            _send_invoice_created_notifications(saved)
+            await _send_invoice_created_notifications(saved)
             created.append({"student_id": sid, "invoice_no": inv["invoice_no"], "amount": inv["amount"]})
         except HTTPException as ex:
             skipped.append({"student_id": sid, "reason": str(ex.detail)})
@@ -1521,7 +1521,7 @@ async def create_invoice(payload: InvoiceIn, user: dict = Depends(require_role("
     if carry_sources:
         await _cancel_carried_forward_invoices(carry_sources, saved_raw, user)
     saved = serialize_doc(saved_raw)
-    _send_invoice_created_notifications(saved)
+    await _send_invoice_created_notifications(saved)
     return saved
 
 @api.get("/invoices/{iid}")
@@ -1545,9 +1545,9 @@ async def remind_invoice(iid: str, user: dict = Depends(require_role("finance", 
         raise HTTPException(400, "Reminder cannot be sent for a cancelled invoice.")
     wa_result = email_result = None
     if inv.get("parent_whatsapp"):
-        wa_result = send_fee_reminder_whatsapp(inv["parent_whatsapp"], inv)
+        wa_result = await send_fee_reminder_whatsapp(inv["parent_whatsapp"], inv)
     if inv.get("parent_email"):
-        invoice_pdf_url = portal_pdf_url(str(inv.get("student_id", "")), "invoice", str(inv.get("_id", "")))
+        invoice_pdf_url = await portal_pdf_url(str(inv.get("student_id", "")), "invoice", str(inv.get("_id", "")))
         email_result = send_template_email(inv["parent_email"], "payment_reminder", {
             "invoice_no": inv["invoice_no"],
             "student_name": inv.get("student_name", ""),
@@ -1612,10 +1612,10 @@ async def record_payment(payload: PaymentIn, user: dict = Depends(require_role("
     sub = await _extend_subscription(inv["student_id"], plan)
     saved["subscription"] = sub
     if inv.get("parent_whatsapp"):
-        send_payment_receipt_whatsapp(inv["parent_whatsapp"], inv, saved)
+        await send_payment_receipt_whatsapp(inv["parent_whatsapp"], inv, saved)
     if inv.get("parent_email"):
-        invoice_pdf_url = portal_pdf_url(str(inv.get("student_id", "")), "invoice", str(inv.get("_id", "")))
-        receipt_pdf_url = portal_pdf_url(str(saved.get("student_id", "")), "receipt", str(saved.get("id", "")))
+        invoice_pdf_url = await portal_pdf_url(str(inv.get("student_id", "")), "invoice", str(inv.get("_id", "")))
+        receipt_pdf_url = await portal_pdf_url(str(saved.get("student_id", "")), "receipt", str(saved.get("id", "")))
         send_template_email(inv["parent_email"], "payment_receipt", {
             "receipt_no": receipt_no,
             "amount": money_text(payload.amount),
@@ -2874,10 +2874,46 @@ class MagicLinkOut(BaseModel):
     token: str
     expires_at: str
 
-def _portal_token(student_id: str, days: int = 180) -> tuple[str, datetime]:
+PORTAL_TOKEN_TTL_DAYS = 180
+# Reuse the stored token as long as it still has more than this many days left,
+# instead of minting (and silently discarding) a brand new JWT on every call.
+PORTAL_TOKEN_REFRESH_THRESHOLD_DAYS = 14
+
+def _mint_portal_token(student_id: str, days: int = PORTAL_TOKEN_TTL_DAYS) -> tuple[str, datetime]:
     exp = now_utc() + timedelta(days=days)
     payload = {"sub": student_id, "type": "portal", "exp": exp}
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGO), exp
+
+async def get_or_create_portal_token(student_id: str, force_new: bool = False) -> tuple[str, datetime]:
+    """Return a persisted portal JWT for this student, reusing the one already
+    stored on the student document whenever it's still comfortably valid.
+
+    Previously every call to this logic minted a brand new JWT and never saved
+    it anywhere, so every email/WhatsApp notification (and every magic-link
+    request) embedded a different, unrelated token. Now the token + its
+    expiry are stored on the student record and only replaced when there
+    isn't a usable one yet.
+    """
+    student = await db.students.find_one({"_id": oid(student_id)})
+    existing_token = (student or {}).get("portal_token")
+    existing_exp = (student or {}).get("portal_token_expires_at")
+    if not force_new and existing_token and existing_exp:
+        try:
+            expires_dt = datetime.fromisoformat(existing_exp)
+            if expires_dt > now_utc() + timedelta(days=PORTAL_TOKEN_REFRESH_THRESHOLD_DAYS):
+                return existing_token, expires_dt
+        except (TypeError, ValueError):
+            pass  # stored value is unusable - fall through and mint a fresh one
+    token, exp = _mint_portal_token(student_id)
+    await db.students.update_one(
+        {"_id": oid(student_id)},
+        {"$set": {
+            "portal_token": token,
+            "portal_token_expires_at": iso(exp),
+            "portal_token_issued_at": iso(now_utc()),
+        }},
+    )
+    return token, exp
 
 def _decode_portal_token(token: str) -> str:
     try:
@@ -2895,11 +2931,7 @@ async def create_magic_link(sid: str, _: dict = Depends(require_role("ops_manage
     s = await db.students.find_one({"_id": oid(sid)})
     if not s:
         raise HTTPException(404, "Student not found")
-    token, exp = _portal_token(sid)
-    await db.students.update_one(
-        {"_id": oid(sid)},
-        {"$set": {"portal_token_issued_at": iso(now_utc())}},
-    )
+    token, exp = await get_or_create_portal_token(sid)
     return {"token": token, "expires_at": iso(exp)}
 
 @api.get("/portal/{token}/data")
