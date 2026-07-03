@@ -334,6 +334,12 @@ class UserCreate(BaseModel):
     password: str
     role: str
 
+class UserUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[EmailStr] = None
+    role: Optional[str] = None
+    password: Optional[str] = None
+
 # ---------------------------- Startup ----------------------------
 @app.on_event("startup")
 async def startup():
@@ -810,6 +816,56 @@ async def create_user(payload: UserCreate, _: dict = Depends(require_role("direc
            "password_hash": hash_password(payload.password), "created_at": iso(now_utc())}
     res = await db.users.insert_one(doc)
     return serialize_doc({**doc, "_id": res.inserted_id, "password_hash": None})
+
+@api.patch("/users/{uid}")
+async def update_user(uid: str, payload: UserUpdate, user: dict = Depends(require_role("director"))):
+    target = await db.users.find_one({"_id": oid(uid)})
+    if not target:
+        raise HTTPException(404, "User not found")
+
+    updates = {}
+
+    if payload.name is not None:
+        name = payload.name.strip()
+        if not name:
+            raise HTTPException(400, "Name cannot be empty")
+        updates["name"] = name
+
+    if payload.email is not None:
+        new_email = payload.email.lower()
+        if new_email != target["email"]:
+            if await db.users.find_one({"email": new_email, "_id": {"$ne": oid(uid)}}):
+                raise HTTPException(400, "Email already exists")
+            if target["email"] == "admin@chessklub.in":
+                raise HTTPException(400, "Cannot change the primary admin account's email")
+            updates["email"] = new_email
+
+    if payload.role is not None:
+        if payload.role not in ROLES:
+            raise HTTPException(400, "Invalid role")
+        if payload.role != target["role"]:
+            if target["email"] == "admin@chessklub.in":
+                raise HTTPException(400, "Cannot change the primary admin account's role")
+            if str(target["_id"]) == user["id"] and payload.role != "director":
+                remaining_directors = await db.users.count_documents(
+                    {"role": "director", "_id": {"$ne": oid(uid)}}
+                )
+                if remaining_directors == 0:
+                    raise HTTPException(400, "Cannot remove the last director account")
+            updates["role"] = payload.role
+
+    if payload.password:
+        if len(payload.password) < 8:
+            raise HTTPException(400, "Password must be at least 8 characters")
+        updates["password_hash"] = hash_password(payload.password)
+
+    if not updates:
+        raise HTTPException(400, "No changes provided")
+
+    updates["updated_at"] = iso(now_utc())
+    await db.users.update_one({"_id": oid(uid)}, {"$set": updates})
+    updated = await db.users.find_one({"_id": oid(uid)}, {"password_hash": 0})
+    return serialize_doc(updated)
 
 @api.delete("/users/{uid}")
 async def delete_user(uid: str, _: dict = Depends(require_role("director"))):
@@ -1734,7 +1790,7 @@ def _build_student_id_card_pdf(student: dict) -> bytes:
     c.setFont("Helvetica", 5.5)
     c.drawString(14 * mm, height - 10 * mm, "Student Identity Card")
 
-    photo_x, photo_y, photo_w, photo_h = 5 * mm, 20 * mm, 22 * mm, 24 * mm
+    photo_x, photo_y, photo_w, photo_h = 5 * mm, 14 * mm, 22 * mm, 24 * mm
     c.setStrokeColor(colors.HexColor("#dddddd"))
     c.setFillColor(colors.HexColor("#f7f7f7"))
     c.roundRect(photo_x, photo_y, photo_w, photo_h, 2 * mm, fill=1, stroke=1)
@@ -1751,23 +1807,23 @@ def _build_student_id_card_pdf(student: dict) -> bytes:
 
     c.setFillColor(BLACK)
     c.setFont("Helvetica-Bold", 10)
-    c.drawString(31 * mm, 40 * mm, (student.get("full_name") or "")[:28])
+    c.drawString(31 * mm, 34 * mm, (student.get("full_name") or "")[:28])
     c.setFont("Helvetica", 7)
     c.setFillColor(GRAY)
-    c.drawString(31 * mm, 35.5 * mm, f"ID: {student.get('student_code', '')}")
+    c.drawString(31 * mm, 29.5 * mm, f"ID: {student.get('student_code', '')}")
     if student.get("dob"):
-        c.drawString(31 * mm, 31.5 * mm, f"DOB: {student.get('dob')}")
+        c.drawString(31 * mm, 25.5 * mm, f"DOB: {student.get('dob')}")
     if student.get("parent_name"):
-        c.drawString(31 * mm, 27.5 * mm, f"Parent: {(student.get('parent_name') or '')[:24]}")
+        c.drawString(31 * mm, 21.5 * mm, f"Parent: {(student.get('parent_name') or '')[:24]}")
     if student.get("parent_whatsapp"):
-        c.drawString(31 * mm, 23.5 * mm, f"WA: {student.get('parent_whatsapp')}")
+        c.drawString(31 * mm, 17.5 * mm, f"WA: {student.get('parent_whatsapp')}")
 
     qr_size = 20 * mm
     drawing = _qr_flowable(student_qr_payload(student.get("student_code", "")), size_mm=20)
-    renderPDF.draw(drawing, c, width - 25 * mm, 20 * mm)
+    renderPDF.draw(drawing, c, width - 25 * mm, 14 * mm)
     c.setFillColor(BLACK)
     c.setFont("Helvetica-Bold", 5.5)
-    c.drawCentredString(width - 15 * mm, 17.5 * mm, "SCAN AT KIOSK")
+    c.drawCentredString(width - 15 * mm, 35.5 * mm, "SCAN AT KIOSK")
 
     c.setFillColor(colors.HexColor("#f7f7f7"))
     c.rect(0, 0, width, 12 * mm, fill=1, stroke=0)

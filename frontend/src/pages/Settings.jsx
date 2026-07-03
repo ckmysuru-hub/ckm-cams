@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { UserPlus, Trash2, CheckCircle2, XCircle, Send, Loader2 } from "lucide-react";
+import { UserPlus, Trash2, CheckCircle2, XCircle, Send, Loader2, Pencil } from "lucide-react";
 import { toast } from "sonner";
 
 const ROLES = ["director","ops_manager","coach","front_desk","finance"];
@@ -18,6 +18,10 @@ export default function Settings() {
   const [users, setUsers] = useState([]);
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ name:"", email:"", password:"", role:"front_desk" });
+  const [editOpen, setEditOpen] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [editForm, setEditForm] = useState({ name:"", email:"", password:"", role:"front_desk" });
+  const [editSaving, setEditSaving] = useState(false);
   const [testForm, setTestForm] = useState({ to_phone: "", to_email: "", message: "Hello from Chess Klub Mysuru CAMS — this is a test message." });
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState(null);
@@ -41,6 +45,27 @@ export default function Settings() {
     if (!window.confirm("Delete user?")) return;
     await api.delete(`/users/${id}`);
     api.get("/users").then((r)=>setUsers(r.data));
+  };
+
+  const openEdit = (u) => {
+    setEditingId(u.id);
+    setEditForm({ name: u.name || "", email: u.email || "", password: "", role: u.role || "front_desk" });
+    setEditOpen(true);
+  };
+
+  const submitEdit = async (e) => {
+    e.preventDefault();
+    const payload = { name: editForm.name, email: editForm.email, role: editForm.role };
+    if (editForm.password) payload.password = editForm.password;
+    setEditSaving(true);
+    try {
+      await api.patch(`/users/${editingId}`, payload);
+      toast.success("User updated");
+      setEditOpen(false);
+      api.get("/users").then((r)=>setUsers(r.data));
+    } catch (ex) {
+      toast.error(formatApiError(ex.response?.data?.detail));
+    } finally { setEditSaving(false); }
   };
 
   const sendTest = async (e) => {
@@ -190,14 +215,48 @@ export default function Settings() {
                   <td>{u.email}</td>
                   <td><span className="ck-pill ck-pill-orange">{u.role?.replace("_"," ")}</span></td>
                   <td className="text-right pr-4">
-                    {u.email !== "admin@chessklub.in" && (
-                      <button onClick={()=>del(u.id)} className="text-[var(--ck-muted)] hover:text-red-600"><Trash2 size={14}/></button>
-                    )}
+                    <div className="flex items-center justify-end gap-3">
+                      <button onClick={()=>openEdit(u)} className="text-[var(--ck-muted)] hover:text-[var(--ck-accent,#2563eb)]" data-testid={`edit-user-${u.id}`}><Pencil size={14}/></button>
+                      {u.email !== "admin@chessklub.in" && (
+                        <button onClick={()=>del(u.id)} className="text-[var(--ck-muted)] hover:text-red-600"><Trash2 size={14}/></button>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
+
+          <Dialog open={editOpen} onOpenChange={setEditOpen}>
+            <DialogContent className="max-w-md">
+              <DialogHeader><DialogTitle>Edit team member</DialogTitle></DialogHeader>
+              <form onSubmit={submitEdit} className="space-y-3" data-testid="user-edit-form">
+                <div><Label className="text-xs">Name</Label><Input data-testid="uef-name" value={editForm.name} onChange={(e)=>setEditForm({...editForm, name:e.target.value})} required /></div>
+                <div><Label className="text-xs">Email</Label><Input data-testid="uef-email" type="email" value={editForm.email} onChange={(e)=>setEditForm({...editForm, email:e.target.value})} required /></div>
+                <div>
+                  <Label className="text-xs">New password</Label>
+                  <Input data-testid="uef-password" type="password" placeholder="Leave blank to keep current password"
+                         value={editForm.password} onChange={(e)=>setEditForm({...editForm, password:e.target.value})} />
+                </div>
+                <div>
+                  <Label className="text-xs">Role</Label>
+                  <Select value={editForm.role} onValueChange={(v)=>setEditForm({...editForm, role:v})}>
+                    <SelectTrigger data-testid="uef-role"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {ROLES.map((r)=>(<SelectItem key={r} value={r}>{r.replace("_"," ")}</SelectItem>))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="flex justify-end gap-2">
+                  <button type="button" className="ck-btn-ghost" onClick={()=>setEditOpen(false)}>Cancel</button>
+                  <button type="submit" disabled={editSaving} className="ck-btn-primary flex items-center gap-2" data-testid="uef-submit">
+                    {editSaving ? <Loader2 size={14} className="animate-spin"/> : null}
+                    {editSaving ? "Saving…" : "Save changes"}
+                  </button>
+                </div>
+              </form>
+            </DialogContent>
+          </Dialog>
         </div>
       )}
     </>
