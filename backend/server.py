@@ -27,6 +27,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo.errors import DuplicateKeyError
 from pydantic import BaseModel, Field, EmailStr, ConfigDict
 
 from reportlab.lib.pagesizes import A4, landscape
@@ -2880,26 +2881,47 @@ async def razorpay_webhook(request: Request):
         logger.warning(f"Razorpay webhook missing invoice_id/payment_id/amount: {body}")
         return {"status": "ignored", "reason": "incomplete_payload"}
 
-    # Idempotency: Razorpay can (and will) redeliver the same event.
-    if await db.receipts.find_one({"transaction_ref": razorpay_payment_id, "mode": "razorpay"}):
+    # Idempotency: Razorpay sends *multiple* webhook events for one payment
+    # (typically both payment_link.paid and payment.captured, sometimes near-
+    # simultaneously), and can also redeliver the same event on retry. A plain
+    # "does a receipt already exist?" check is a check-then-act race - two
+    # concurrent deliveries can both pass the check before either has inserted
+    # its receipt, producing two receipts for one payment. To close that race,
+    # atomically claim the Razorpay payment id first using Mongo's native _id
+    # uniqueness: only one concurrent insert can ever win.
+    try:
+        await db.razorpay_processed_payments.insert_one({
+            "_id": razorpay_payment_id,
+            "invoice_id": invoice_id,
+            "event": event,
+            "received_at": iso(now_utc()),
+        })
+    except DuplicateKeyError:
         return {"status": "ok", "already_processed": True}
 
     try:
-        inv = await db.invoices.find_one({"_id": oid(invoice_id)})
-    except HTTPException:
-        inv = None
-    if not inv:
-        logger.warning(f"Razorpay webhook: invoice {invoice_id} not found")
-        return {"status": "ignored", "reason": "invoice_not_found"}
-    if inv.get("status") in ("paid", "cancelled") or float(inv.get("balance", 0) or 0) <= 0:
-        return {"status": "ok", "already_settled": True}
+        try:
+            inv = await db.invoices.find_one({"_id": oid(invoice_id)})
+        except HTTPException:
+            inv = None
+        if not inv:
+            logger.warning(f"Razorpay webhook: invoice {invoice_id} not found")
+            return {"status": "ignored", "reason": "invoice_not_found"}
+        if inv.get("status") in ("paid", "cancelled") or float(inv.get("balance", 0) or 0) <= 0:
+            return {"status": "ok", "already_settled": True}
 
-    amount_rupees = round(float(amount_paise) / 100.0, 2)
-    await _apply_invoice_payment(
-        inv, amount_rupees, "razorpay", razorpay_payment_id,
-        "Razorpay (online payment)", iso(now_utc()),
-    )
-    return {"status": "ok"}
+        amount_rupees = round(float(amount_paise) / 100.0, 2)
+        await _apply_invoice_payment(
+            inv, amount_rupees, "razorpay", razorpay_payment_id,
+            "Razorpay (online payment)", iso(now_utc()),
+        )
+        return {"status": "ok"}
+    except Exception:
+        # Release the claim so a genuine retry (not just Razorpay's normal
+        # multi-event delivery) can still get processed instead of being
+        # silently swallowed by a payment that failed halfway through.
+        await db.razorpay_processed_payments.delete_one({"_id": razorpay_payment_id})
+        raise
 
 # ---------------------------- Notification Self-Test ----------------------------
 class TestNotifyIn(BaseModel):
