@@ -15,7 +15,7 @@ import re
 import hmac
 import hashlib
 from datetime import datetime, timezone, timedelta, date
-from typing import List, Optional, Literal
+from typing import List, Optional, Literal, Dict
 
 import bcrypt
 import jwt
@@ -86,6 +86,7 @@ AUTO_INVOICE_CHECK_INTERVAL_SECONDS = int(os.environ.get("AUTO_INVOICE_CHECK_INT
 auto_invoice_task: Optional[asyncio.Task] = None
 UPLOAD_DIR = ROOT_DIR / "uploads"
 STUDENT_PHOTO_DIR = UPLOAD_DIR / "student-photos"
+EVENT_POSTER_DIR = UPLOAD_DIR / "event-posters"
 
 level_urls = {
     "Beginner Level 1": "https://my.chessklub.com/spaces/3728452/content",
@@ -579,6 +580,7 @@ WHATSAPP_TEMPLATES = {
     "notify_test": os.environ.get("WHATSAPP_NOTIFY_TEST_TEMPLATE", "notify_test"),
     "batch_announcement": os.environ.get("WHATSAPP_BATCH_ANNOUNCEMENT_TEMPLATE", "batch_announcement"),
     "batch_group_invite": os.environ.get("WHATSAPP_BATCH_GROUP_INVITE_TEMPLATE", "batch_group_invite"),
+    "event_registration_confirmed": os.environ.get("WHATSAPP_EVENT_REGISTRATION_CONFIRMED_TEMPLATE", "event_registration_confirmed"),
 }
 
 
@@ -1807,11 +1809,11 @@ async def _apply_invoice_payment(inv: dict, amount: float, mode: str, transactio
         await _cancel_razorpay_payment_link(inv["razorpay_payment_link_id"])
 
     if inv.get("parent_whatsapp"):
-        await send_payment_receipt_whatsapp(inv["parent_whatsapp"], inv, saved)
+        await _notify_safely_async("payment_receipt whatsapp", send_payment_receipt_whatsapp(inv["parent_whatsapp"], inv, saved))
     if inv.get("parent_email"):
         invoice_pdf_url = await portal_pdf_url(str(inv.get("student_id", "")), "invoice", invoice_id)
         receipt_pdf_url = await portal_pdf_url(str(saved.get("student_id", "")), "receipt", _doc_id(saved))
-        send_template_email(inv["parent_email"], "payment_receipt", {
+        _notify_safely("payment_receipt email", send_template_email, inv["parent_email"], "payment_receipt", {
             "receipt_no": receipt_no,
             "amount": money_text(amount),
             "invoice_no": inv["invoice_no"],
@@ -2847,13 +2849,68 @@ async def whatsapp_webhook_incoming(request: Request):
         parsed = {"inbound": 0, "statuses": 0}
     return {"status": "ok", **parsed}
 
+def _notify_safely(label: str, fn, *args, **kwargs):
+    """Run a best-effort notification send without letting a failure (bad
+    template name, WhatsApp/SMTP outage, etc.) propagate into code that's in
+    the middle of recording a payment - most importantly the Razorpay
+    webhook, where an unhandled exception here would turn a *successful*
+    payment into what looks like a failed webhook delivery, causing Razorpay
+    to retry it (and re-triggering this same notification attempt)."""
+    try:
+        return fn(*args, **kwargs)
+    except Exception as e:
+        logger.warning(f"Notification failed ({label}): {e}")
+        return None
+
+async def _notify_safely_async(label: str, coro):
+    try:
+        return await coro
+    except Exception as e:
+        logger.warning(f"Notification failed ({label}): {e}")
+        return None
+
+async def _apply_event_registration_payment(reg: dict, amount: float, razorpay_payment_id: str) -> dict:
+    """Mark an event registration as paid once its Razorpay payment link is
+    settled: updates the registration, and sends a WhatsApp/email confirmation
+    if contact details were given."""
+    reg_id = str(reg.get("id") or reg["_id"])
+    updates = {
+        "payment_status": "paid",
+        "amount_paid": amount,
+        "transaction_ref": razorpay_payment_id,
+        "razorpay_payment_link_status": "paid",
+        "paid_at": iso(now_utc()),
+    }
+    await db.event_registrations.update_one({"_id": oid(reg_id)}, {"$set": updates})
+    updated = await db.event_registrations.find_one({"_id": oid(reg_id)})
+    saved = serialize_doc(updated)
+
+    event = await db.events.find_one({"_id": oid(reg["event_id"])}) if reg.get("event_id") else None
+    event_title = (event or {}).get("title", reg.get("event_title", "the event"))
+    when = (event or {}).get("event_datetime", "")
+    if saved.get("phone"):
+        _notify_safely("event_registration_confirmed whatsapp", send_named_whatsapp_template,
+                       saved["phone"], "event_registration_confirmed",
+                       [saved.get("name", ""), event_title, saved.get("registration_no", ""), when])
+    if saved.get("email"):
+        _notify_safely("event_registration_confirmed email", send_template_email,
+                       saved["email"], "event_registration_confirmed", {
+            "name": saved.get("name", ""),
+            "event_title": event_title,
+            "registration_no": saved.get("registration_no", ""),
+            "amount": money_text(amount),
+            "event_datetime": when,
+        })
+    return saved
+
 # ---------------------------- Razorpay Webhook ----------------------------
 @api.post("/webhooks/razorpay")
 async def razorpay_webhook(request: Request):
-    """Receives Razorpay payment-link events and marks the matching invoice as
-    paid automatically. Configure this URL (…/api/webhooks/razorpay) plus the
-    'payment_link.paid' event in Razorpay Dashboard → Settings → Webhooks, and
-    put the webhook secret you set there into RAZORPAY_WEBHOOK_SECRET."""
+    """Receives Razorpay payment-link events and marks the matching invoice OR
+    event registration as paid automatically. Configure this URL
+    (…/api/webhooks/razorpay) plus the 'payment_link.paid' event in Razorpay
+    Dashboard → Settings → Webhooks, and put the webhook secret you set there
+    into RAZORPAY_WEBHOOK_SECRET."""
     raw_body = await request.body()
     secret = os.environ.get("RAZORPAY_WEBHOOK_SECRET")
     signature = request.headers.get("X-Razorpay-Signature", "")
@@ -2873,12 +2930,15 @@ async def razorpay_webhook(request: Request):
 
     link_entity = ((body.get("payload") or {}).get("payment_link") or {}).get("entity") or {}
     payment_entity = ((body.get("payload") or {}).get("payment") or {}).get("entity") or {}
-    invoice_id = (link_entity.get("notes") or {}).get("invoice_id") or (payment_entity.get("notes") or {}).get("invoice_id")
+    notes = link_entity.get("notes") or payment_entity.get("notes") or {}
+    kind = notes.get("kind", "invoice" if notes.get("invoice_id") else None)
+    registration_id = notes.get("registration_id")
+    invoice_id = notes.get("invoice_id")
     razorpay_payment_id = payment_entity.get("id")
     amount_paise = payment_entity.get("amount") or link_entity.get("amount_paid") or link_entity.get("amount")
 
-    if not invoice_id or not razorpay_payment_id or not amount_paise:
-        logger.warning(f"Razorpay webhook missing invoice_id/payment_id/amount: {body}")
+    if not razorpay_payment_id or not amount_paise or not (registration_id or invoice_id):
+        logger.warning(f"Razorpay webhook missing payment_id/amount/reference: {body}")
         return {"status": "ignored", "reason": "incomplete_payload"}
 
     # Idempotency: Razorpay sends *multiple* webhook events for one payment
@@ -2892,14 +2952,28 @@ async def razorpay_webhook(request: Request):
     try:
         await db.razorpay_processed_payments.insert_one({
             "_id": razorpay_payment_id,
-            "invoice_id": invoice_id,
-            "event": event,
-            "received_at": iso(now_utc()),
+            "invoice_id": invoice_id, "registration_id": registration_id,
+            "event": event, "received_at": iso(now_utc()),
         })
     except DuplicateKeyError:
         return {"status": "ok", "already_processed": True}
 
     try:
+        amount_rupees = round(float(amount_paise) / 100.0, 2)
+
+        if kind == "event_registration" or (registration_id and not invoice_id):
+            try:
+                reg = await db.event_registrations.find_one({"_id": oid(registration_id)})
+            except HTTPException:
+                reg = None
+            if not reg:
+                logger.warning(f"Razorpay webhook: event registration {registration_id} not found")
+                return {"status": "ignored", "reason": "registration_not_found"}
+            if reg.get("payment_status") == "paid":
+                return {"status": "ok", "already_settled": True}
+            await _apply_event_registration_payment(reg, amount_rupees, razorpay_payment_id)
+            return {"status": "ok"}
+
         try:
             inv = await db.invoices.find_one({"_id": oid(invoice_id)})
         except HTTPException:
@@ -2910,7 +2984,6 @@ async def razorpay_webhook(request: Request):
         if inv.get("status") in ("paid", "cancelled") or float(inv.get("balance", 0) or 0) <= 0:
             return {"status": "ok", "already_settled": True}
 
-        amount_rupees = round(float(amount_paise) / 100.0, 2)
         await _apply_invoice_payment(
             inv, amount_rupees, "razorpay", razorpay_payment_id,
             "Razorpay (online payment)", iso(now_utc()),
@@ -2922,6 +2995,8 @@ async def razorpay_webhook(request: Request):
         # silently swallowed by a payment that failed halfway through.
         await db.razorpay_processed_payments.delete_one({"_id": razorpay_payment_id})
         raise
+
+
 
 # ---------------------------- Notification Self-Test ----------------------------
 class TestNotifyIn(BaseModel):
@@ -3620,7 +3695,290 @@ async def import_students(payload: StudentImportRow, user: dict = Depends(requir
             errors.append({"row": idx, "reason": str(e)})
     return {"created": len(created), "errors": errors, "details": created}
 
-# ---------------------------- Mount ----------------------------
+# ---------------------------- Events ----------------------------
+class EventCustomField(BaseModel):
+    id: str                      # stable slug, e.g. "tshirt_size" - used as the answer key
+    label: str
+    type: Literal["text", "textarea", "email", "phone", "number", "select", "checkbox"] = "text"
+    required: bool = False
+    options: Optional[List[str]] = None   # for type == "select"
+
+class EventIn(BaseModel):
+    title: str
+    description: Optional[str] = ""
+    poster_url: Optional[str] = None
+    event_datetime: str          # ISO datetime, e.g. "2026-08-15T17:00"
+    venue: Optional[str] = ""
+    fee: float = 0
+    registration_open: bool = True
+    status: Literal["draft", "published", "cancelled"] = "published"
+    custom_fields: List[EventCustomField] = []
+
+class EventUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    poster_url: Optional[str] = None
+    event_datetime: Optional[str] = None
+    venue: Optional[str] = None
+    fee: Optional[float] = None
+    registration_open: Optional[bool] = None
+    status: Optional[Literal["draft", "published", "cancelled"]] = None
+    custom_fields: Optional[List[EventCustomField]] = None
+
+class PublicEventRegistrationIn(BaseModel):
+    name: str
+    email: Optional[EmailStr] = None
+    phone: Optional[str] = None
+    custom_field_values: Dict[str, str] = {}
+
+async def gen_registration_no() -> str:
+    today = datetime.now()
+    n = await next_counter(f"event-reg-{today.year}-{today.month:02d}")
+    return f"REG-{today.year}{today.month:02d}-{n:04d}"
+
+def _validate_custom_field_values(event: dict, values: Dict[str, str]) -> None:
+    for f in event.get("custom_fields", []):
+        val = (values or {}).get(f["id"], "")
+        if f.get("required"):
+            if f.get("type") == "checkbox":
+                if str(val).lower() not in ("true", "on", "1", "yes"):
+                    raise HTTPException(400, f"'{f['label']}' is required")
+            elif not str(val).strip():
+                raise HTTPException(400, f"'{f['label']}' is required")
+        if f.get("type") == "select" and val and f.get("options") and val not in f["options"]:
+            raise HTTPException(400, f"'{val}' is not a valid option for '{f['label']}'")
+
+async def create_event_registration_payment_link(registration: dict, event: dict) -> Optional[dict]:
+    """One-shot Razorpay payment link for an event registration fee (unlike
+    invoices, a registration's fee is fixed at submission time - there's no
+    partial-payment/reuse concept to manage here)."""
+    if not razorpay_enabled():
+        return None
+    fee = round(float(registration.get("fee", 0) or 0), 2)
+    if fee <= 0:
+        return None
+    rid = str(registration.get("_id") or registration.get("id") or "")
+    body = {
+        "amount": int(round(fee * 100)),
+        "currency": "INR",
+        "accept_partial": False,
+        "description": f"{os.environ.get('ACADEMY_NAME', 'Chess Klub Mysuru')} - {event.get('title', 'Event')} registration",
+        "customer": {k: v for k, v in {
+            "name": registration.get("name"), "email": registration.get("email"),
+            "contact": (registration.get("phone") or "").replace(" ", "").replace("-", "") or None,
+        }.items() if v},
+        "notify": {"sms": False, "email": False},
+        "reminder_enable": False,
+        "reference_id": f"evtreg-{rid}-{uuid.uuid4().hex[:8]}",
+        "notes": {"kind": "event_registration", "registration_id": rid, "event_id": str(event.get("_id", ""))},
+    }
+    try:
+        r = requests.post(f"{RAZORPAY_API_BASE}/payment_links", auth=_razorpay_auth(), json=body, timeout=15)
+        data = r.json()
+        if not r.ok:
+            logger.warning(f"Razorpay event registration link creation failed [{r.status_code}]: {data}")
+            return None
+    except Exception as e:
+        logger.warning(f"Razorpay event registration link creation exception: {e}")
+        return None
+    link_id, short_url = data.get("id"), data.get("short_url")
+    if not (link_id and short_url):
+        return None
+    await db.event_registrations.update_one(
+        {"_id": oid(rid)},
+        {"$set": {"razorpay_payment_link_id": link_id, "razorpay_payment_link_url": short_url,
+                  "razorpay_payment_link_status": data.get("status", "created")}},
+    )
+    return {"url": short_url, "id": link_id}
+
+@api.post("/events/poster")
+async def upload_event_poster(poster: UploadFile = File(...), _: dict = Depends(require_role("director"))):
+    if not (poster.content_type or "").startswith("image/"):
+        raise HTTPException(400, "Upload a JPG, PNG or WebP image")
+    raw = await poster.read()
+    if len(raw) > 5 * 1024 * 1024:
+        raise HTTPException(400, "Poster must be 5 MB or smaller")
+    EVENT_POSTER_DIR.mkdir(parents=True, exist_ok=True)
+    ext = _safe_upload_ext(poster.filename or "", poster.content_type or "")
+    filename = f"{uuid.uuid4().hex}{ext}"
+    path = EVENT_POSTER_DIR / filename
+    path.write_bytes(raw)
+    url_path = f"/uploads/event-posters/{filename}"
+    return {"poster_url": url_path, "absolute_url": public_file_url(url_path)}
+
+@api.post("/events")
+async def create_event(payload: EventIn, user: dict = Depends(require_role("director"))):
+    doc = payload.model_dump()
+    doc["created_by"] = user["id"]
+    doc["created_at"] = iso(now_utc())
+    doc["updated_at"] = iso(now_utc())
+    res = await db.events.insert_one(doc)
+    return serialize_doc({**doc, "_id": res.inserted_id})
+
+@api.get("/events")
+async def list_events(_: dict = Depends(get_current_user)):
+    items = await db.events.find().sort("event_datetime", -1).to_list(500)
+    out = []
+    for e in items:
+        eid = str(e["_id"])
+        total = await db.event_registrations.count_documents({"event_id": eid})
+        confirmed = await db.event_registrations.count_documents({"event_id": eid, "payment_status": {"$in": ["paid", "free"]}})
+        d = serialize_doc(e)
+        d["registrations_count"] = total
+        d["confirmed_count"] = confirmed
+        out.append(d)
+    return out
+
+@api.get("/events/{eid}")
+async def get_event(eid: str, _: dict = Depends(get_current_user)):
+    e = await db.events.find_one({"_id": oid(eid)})
+    if not e:
+        raise HTTPException(404, "Event not found")
+    return serialize_doc(e)
+
+@api.patch("/events/{eid}")
+async def update_event(eid: str, payload: EventUpdate, _: dict = Depends(require_role("director"))):
+    e = await db.events.find_one({"_id": oid(eid)})
+    if not e:
+        raise HTTPException(404, "Event not found")
+    updates = payload.model_dump(exclude_unset=True)
+    if not updates:
+        raise HTTPException(400, "No changes provided")
+    updates["updated_at"] = iso(now_utc())
+    await db.events.update_one({"_id": oid(eid)}, {"$set": updates})
+    updated = await db.events.find_one({"_id": oid(eid)})
+    return serialize_doc(updated)
+
+@api.delete("/events/{eid}")
+async def delete_event(eid: str, _: dict = Depends(require_role("director"))):
+    count = await db.event_registrations.count_documents({"event_id": eid})
+    if count > 0:
+        raise HTTPException(400, "This event already has registrations - set its status to 'cancelled' instead of deleting it")
+    e = await db.events.find_one({"_id": oid(eid)})
+    if not e:
+        raise HTTPException(404, "Event not found")
+    await db.events.delete_one({"_id": oid(eid)})
+    return {"ok": True}
+
+@api.get("/events/{eid}/registrations")
+async def list_event_registrations(eid: str, _: dict = Depends(require_role("director"))):
+    items = await db.event_registrations.find({"event_id": eid}).sort("created_at", -1).to_list(2000)
+    return [serialize_doc(x) for x in items]
+
+@api.get("/events/{eid}/registrations/export.csv")
+async def export_event_registrations_csv(eid: str, _: dict = Depends(require_role("director"))):
+    e = await db.events.find_one({"_id": oid(eid)})
+    if not e:
+        raise HTTPException(404, "Event not found")
+    custom_fields = e.get("custom_fields", [])
+    items = await db.event_registrations.find({"event_id": eid}).sort("created_at", 1).to_list(5000)
+    headers = ["registration_no", "name", "email", "phone", "payment_status", "amount_paid",
+              "transaction_ref", "created_at"] + [f["label"] for f in custom_fields]
+    rows = []
+    for r in items:
+        row = {
+            "registration_no": r.get("registration_no", ""),
+            "name": r.get("name", ""),
+            "email": r.get("email", "") or "",
+            "phone": r.get("phone", "") or "",
+            "payment_status": r.get("payment_status", ""),
+            "amount_paid": r.get("amount_paid", 0),
+            "transaction_ref": r.get("transaction_ref", "") or "",
+            "created_at": r.get("created_at", ""),
+        }
+        values = r.get("custom_field_values", {}) or {}
+        for f in custom_fields:
+            row[f["label"]] = values.get(f["id"], "")
+        rows.append(row)
+    safe_title = re.sub(r"[^A-Za-z0-9_-]+", "-", e.get("title", "event")).strip("-").lower() or "event"
+    return _csv_response(rows, headers, f"{safe_title}-registrations")
+
+# ---- Public: browse + register for events ----
+@api.get("/public/events")
+async def list_public_events():
+    items = await db.events.find({"status": "published"}).sort("event_datetime", 1).to_list(200)
+    return [{
+        "id": str(e["_id"]), "title": e["title"], "poster_url": e.get("poster_url"),
+        "event_datetime": e.get("event_datetime"), "venue": e.get("venue", ""),
+        "fee": e.get("fee", 0), "registration_open": e.get("registration_open", False),
+    } for e in items]
+
+@api.get("/public/events/{eid}")
+async def get_public_event(eid: str):
+    try:
+        e = await db.events.find_one({"_id": oid(eid)})
+    except HTTPException:
+        e = None
+    if not e or e.get("status") != "published":
+        raise HTTPException(404, "Event not found")
+    return {
+        "id": str(e["_id"]), "title": e["title"], "description": e.get("description", ""),
+        "poster_url": e.get("poster_url"), "event_datetime": e.get("event_datetime"),
+        "venue": e.get("venue", ""), "fee": e.get("fee", 0),
+        "registration_open": e.get("registration_open", False),
+        "custom_fields": e.get("custom_fields", []),
+    }
+
+@api.post("/public/events/{eid}/register")
+async def register_for_event(eid: str, payload: PublicEventRegistrationIn):
+    """PUBLIC — anyone can register for a published, open event. If the event
+    has a fee, a Razorpay payment link is created and returned so the frontend
+    can send the registrant to pay; the registration is confirmed automatically
+    by the Razorpay webhook once payment comes in (see /webhooks/razorpay)."""
+    try:
+        e = await db.events.find_one({"_id": oid(eid)})
+    except HTTPException:
+        e = None
+    if not e or e.get("status") != "published":
+        raise HTTPException(404, "Event not found")
+    if not e.get("registration_open"):
+        raise HTTPException(400, "Registration is closed for this event")
+    _validate_custom_field_values(e, payload.custom_field_values)
+
+    fee = round(float(e.get("fee", 0) or 0), 2)
+    doc = {
+        "event_id": eid,
+        "event_title": e.get("title", ""),
+        "registration_no": await gen_registration_no(),
+        "name": payload.name.strip(),
+        "email": payload.email,
+        "phone": payload.phone,
+        "custom_field_values": payload.custom_field_values or {},
+        "fee": fee,
+        "amount_paid": 0.0,
+        "transaction_ref": "",
+        "payment_status": "free" if fee <= 0 else "pending",
+        "created_at": iso(now_utc()),
+    }
+    res = await db.event_registrations.insert_one(doc)
+    saved = serialize_doc({**doc, "_id": res.inserted_id})
+
+    if fee <= 0:
+        if saved.get("phone"):
+            _notify_safely("free event_registration_confirmed whatsapp", send_named_whatsapp_template,
+                           saved["phone"], "event_registration_confirmed",
+                           [saved.get("name", ""), e.get("title", ""), saved.get("registration_no", ""), e.get("event_datetime", "")])
+        if saved.get("email"):
+            _notify_safely("free event_registration_confirmed email", send_template_email,
+                           saved["email"], "event_registration_confirmed", {
+                "name": saved.get("name", ""), "event_title": e.get("title", ""),
+                "registration_no": saved.get("registration_no", ""), "amount": "Free",
+                "event_datetime": e.get("event_datetime", ""),
+            })
+        return {"registration_id": saved["id"], "registration_no": saved["registration_no"],
+                "payment_required": False, "confirmed": True}
+
+    link = await create_event_registration_payment_link(saved, e)
+    if not link:
+        # Razorpay not configured / link creation failed - registration is saved but
+        # left "pending"; staff can follow up manually via the registrations list.
+        return {"registration_id": saved["id"], "registration_no": saved["registration_no"],
+                "payment_required": True, "payment_link_url": None,
+                "note": "Online payment is temporarily unavailable - our team will follow up to collect the fee."}
+    return {"registration_id": saved["id"], "registration_no": saved["registration_no"],
+            "payment_required": True, "payment_link_url": link["url"]}
+
+
 app.include_router(api)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")

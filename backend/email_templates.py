@@ -161,7 +161,6 @@ EMAIL_TEMPLATES = {
             <p>This is a reminder for invoice <b>{invoice_no}</b> for <b>{student_name}</b>.</p>
             <p>Balance due: <b>{balance}</b>. Due date: <b>{due_date}</b>.</p>
             <p><a href="{invoice_pdf_url}">View invoice PDF</a></p>
-            
             {payment_button}
                 <p>
         Warm Regards,<br>
@@ -177,7 +176,6 @@ EMAIL_TEMPLATES = {
             <p>This is to inform you that invoice <b>{invoice_no}</b> for <b>{student_name}'s</b> chess classes has been created.</p>
             <p>Balance due: <b>{balance}</b>. Due date: <b>{due_date}</b>.</p>
             <p><a href="{invoice_pdf_url}">View invoice PDF</a></p>
-            
             {payment_button}
                 <p>
         Warm Regards,<br>
@@ -193,6 +191,21 @@ EMAIL_TEMPLATES = {
             <p>We have received <b>{amount}</b> towards invoice <b>{invoice_no}</b>.</p>
             <p>Receipt number: <b>{receipt_no}</b>.</p>
             <p><a href="{receipt_pdf_url}">View receipt PDF</a></p>
+                <p>
+        Warm Regards,<br>
+        <strong> {academy_name}</strong><br>
+        +91 89516 61957
+    </p>
+        """,
+    },
+    "event_registration_confirmed": {
+        "subject": "You're registered! - {event_title}",
+        "html": """
+            <p>Hi {name},</p>
+            <p>Your registration for <b>{event_title}</b> is confirmed. We've received your payment of <b>{amount}</b>.</p>
+            <p>Registration number: <b>{registration_no}</b></p>
+            <p>When: <b>{event_datetime}</b></p>
+            <p>See you there!</p>
                 <p>
         Warm Regards,<br>
         <strong> {academy_name}</strong><br>

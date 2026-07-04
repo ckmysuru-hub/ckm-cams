@@ -18,6 +18,9 @@ import Register from "@/pages/Register";
 import Registrations from "@/pages/Registrations";
 import WhatsAppMessages from "@/pages/WhatsAppMessages";
 import Reports from "@/pages/Reports";
+import Events from "@/pages/Events";
+import EventDetail from "@/pages/EventDetail";
+import PublicEvent from "@/pages/PublicEvent";
 
 function Protected({ children }) {
   const { user, ready } = useAuth();
@@ -41,6 +44,7 @@ function App() {
           <Route path="/kiosk" element={<Kiosk />} />
           <Route path="/portal/:token" element={<ParentPortal />} />
           <Route path="/register" element={<Register />} />
+          <Route path="/events/:id/rsvp" element={<PublicEvent />} />
           <Route element={<Protected><Layout /></Protected>}>
             <Route path="/" element={<Dashboard />} />
             <Route path="/students" element={<Students />} />
@@ -51,6 +55,8 @@ function App() {
             <Route path="/billing" element={<Billing />} />
             <Route path="/receipts" element={<Receipts />} />
             <Route path="/registrations" element={<Registrations />} />
+            <Route path="/events" element={<DirectorOnly><Events /></DirectorOnly>} />
+            <Route path="/events/:id" element={<DirectorOnly><EventDetail /></DirectorOnly>} />
             <Route path="/whatsapp-messages" element={<DirectorOnly><WhatsAppMessages /></DirectorOnly>} />
             <Route path="/reports" element={<DirectorOnly><Reports /></DirectorOnly>} />
             <Route path="/settings" element={<Settings />} />

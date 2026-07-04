@@ -3,7 +3,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { Logo } from "@/components/Brand";
 import {
   LayoutDashboard, Users, Calendar, ClipboardCheck, GraduationCap,
-  ReceiptText, Settings, LogOut, FileText, ScanLine, Inbox, MessageCircle, BarChart3
+  ReceiptText, Settings, LogOut, FileText, ScanLine, Inbox, MessageCircle, BarChart3, PartyPopper
 } from "lucide-react";
 import { Toaster } from "@/components/ui/sonner";
 
@@ -16,6 +16,7 @@ const NAV = [
   { to: "/levels", label: "Levels & Fees", icon: GraduationCap, testid: "nav-levels" },
   { to: "/billing", label: "Billing", icon: ReceiptText, testid: "nav-billing" },
   { to: "/receipts", label: "Receipts", icon: FileText, testid: "nav-receipts" },
+  { to: "/events", label: "Events", icon: PartyPopper, testid: "nav-events", directorOnly: true },
   { to: "/whatsapp-messages", label: "WhatsApp", icon: MessageCircle, testid: "nav-whatsapp", directorOnly: true },
   { to: "/reports", label: "Reports", icon: BarChart3, testid: "nav-reports", directorOnly: true },
   { to: "/settings", label: "Settings", icon: Settings, testid: "nav-settings" },
