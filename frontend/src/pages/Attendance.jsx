@@ -62,14 +62,19 @@ export default function Attendance() {
 
   useEffect(() => {
     if (!batchId) return;
+    const batch = batches.find((b) => b.id === batchId);
     api.get(`/batches/${batchId}/students`).then((r) => setStudents(r.data));
     api.get("/attendance", { params: { batch_id: batchId, session_date: date } })
       .then((r) => {
         setMarks(r.data?.marks || {});
-        setCoachId(r.data?.coach_id || "");
+        // Prefer whatever coach was actually saved for this session (e.g. a
+        // substitute covered the class); otherwise default to whoever the
+        // batch is assigned to, so the coach doesn't have to re-select
+        // themselves every time.
+        setCoachId(r.data?.coach_id || batch?.coach_id || "");
         setTopic(r.data?.topic || "");
       });
-  }, [batchId, date]);
+  }, [batchId, date, batches]);
 
   const setMark = (sid, v) => setMarks((m) => ({ ...m, [sid]: v }));
   const setAll = (v) => {
@@ -114,7 +119,6 @@ export default function Attendance() {
       />
 
       <div className="ck-card-elevated p-4 mb-4 grid md:grid-cols-4 gap-3 items-end">
-        
         <div>
           <div className="text-xs uppercase tracking-wider font-semibold text-[var(--ck-muted)] mb-1">Session Date</div>
           <Input type="date" data-testid="att-date" value={date} onChange={(e)=>setDate(e.target.value)} />
