@@ -114,6 +114,11 @@ export default function Attendance() {
       />
 
       <div className="ck-card-elevated p-4 mb-4 grid md:grid-cols-4 gap-3 items-end">
+        
+        <div>
+          <div className="text-xs uppercase tracking-wider font-semibold text-[var(--ck-muted)] mb-1">Session Date</div>
+          <Input type="date" data-testid="att-date" value={date} onChange={(e)=>setDate(e.target.value)} />
+        </div>
         <div>
           <div className="text-xs uppercase tracking-wider font-semibold text-[var(--ck-muted)] mb-1">Batch</div>
           <Select value={batchId} onValueChange={setBatchId}>
@@ -124,8 +129,8 @@ export default function Attendance() {
           </Select>
         </div>
         <div>
-          <div className="text-xs uppercase tracking-wider font-semibold text-[var(--ck-muted)] mb-1">Session Date</div>
-          <Input type="date" data-testid="att-date" value={date} onChange={(e)=>setDate(e.target.value)} />
+          <div className="text-xs uppercase tracking-wider font-semibold text-[var(--ck-muted)] mb-1">Topic Covered</div>
+          <Input data-testid="att-topic" value={topic} onChange={(e)=>setTopic(e.target.value)} placeholder="e.g. Fork tactics" />
         </div>
         <div>
           <div className="text-xs uppercase tracking-wider font-semibold text-[var(--ck-muted)] mb-1">Coach</div>
@@ -136,10 +141,6 @@ export default function Attendance() {
               {coaches.map((c)=>(<SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>))}
             </SelectContent>
           </Select>
-        </div>
-        <div>
-          <div className="text-xs uppercase tracking-wider font-semibold text-[var(--ck-muted)] mb-1">Topic Covered</div>
-          <Input data-testid="att-topic" value={topic} onChange={(e)=>setTopic(e.target.value)} placeholder="e.g. Fork tactics" />
         </div>
         <div className="md:col-span-4 flex flex-col sm:flex-row gap-2 justify-end">
           <button className="ck-btn-ghost" onClick={()=>setAll("P")} disabled={!students.length} data-testid="mark-all-present">Mark all Present</button>
