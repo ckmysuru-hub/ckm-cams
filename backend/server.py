@@ -160,8 +160,8 @@ def verify_password(pw: str, hashed: str) -> bool:
     except Exception:
         return False
 
-def create_access_token(user_id: str, email: str, role: str) -> str:
-    payload = {"sub": user_id, "email": email, "role": role,
+def create_access_token(user_id: str, email: str, role: str, roles: Optional[List[str]] = None) -> str:
+    payload = {"sub": user_id, "email": email, "role": role, "roles": roles or [role],
                "exp": now_utc() + timedelta(hours=12), "type": "access"}
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGO)
 
@@ -230,6 +230,13 @@ async def get_current_user(request: Request) -> dict:
             raise HTTPException(401, "User not found")
         user = serialize_doc(user)
         user.pop("password_hash", None)
+        # Legacy accounts only have a single "role" field - present a "roles"
+        # list either way so every caller (require_role, the frontend) can
+        # treat multi-role and single-role accounts identically. The startup
+        # migration backfills this on the DB record itself; this is just a
+        # defensive fallback in case that hasn't run yet.
+        if not user.get("roles"):
+            user["roles"] = [user["role"]] if user.get("role") else []
         return user
     except jwt.ExpiredSignatureError:
         raise HTTPException(401, "Token expired")
@@ -238,7 +245,8 @@ async def get_current_user(request: Request) -> dict:
 
 def require_role(*allowed: str):
     async def _dep(user: dict = Depends(get_current_user)):
-        if user.get("role") not in allowed and user.get("role") != "director":
+        roles = set(user.get("roles") or ([user["role"]] if user.get("role") else []))
+        if not (roles & set(allowed)) and "director" not in roles:
             raise HTTPException(403, "Insufficient permissions")
         return user
     return _dep
@@ -328,6 +336,7 @@ class InvoiceIn(BaseModel):
     period: str  # e.g. "2026-02" or "2026-Q1"
     due_date: str  # YYYY-MM-DD
     items: List[InvoiceItem]
+    discount: float = 0
     notes: Optional[str] = ""
 
 class PaymentIn(BaseModel):
@@ -342,12 +351,19 @@ class UserCreate(BaseModel):
     email: EmailStr
     name: str
     password: str
-    role: str
+    roles: List[str]
+
+class ForgotPasswordIn(BaseModel):
+    email: EmailStr
+
+class ResetPasswordIn(BaseModel):
+    token: str
+    new_password: str
 
 class UserUpdate(BaseModel):
     name: Optional[str] = None
     email: Optional[EmailStr] = None
-    role: Optional[str] = None
+    roles: Optional[List[str]] = None
     password: Optional[str] = None
 
 # ---------------------------- Startup ----------------------------
@@ -380,6 +396,7 @@ async def startup():
             "password_hash": hash_password(admin_pw),
             "name": admin_name,
             "role": "director",
+            "roles": ["director"],
             "created_at": iso(now_utc()),
         })
         logger.info(f"Seeded admin {admin_email}")
@@ -387,6 +404,11 @@ async def startup():
         await db.users.update_one({"_id": existing["_id"]},
                                   {"$set": {"password_hash": hash_password(admin_pw)}})
         logger.warning("Admin password reset from ADMIN_PASSWORD because ADMIN_RESET_PASSWORD_ON_STARTUP=true")
+
+    # One-time migration: backfill roles=[role] for accounts created before
+    # multi-role support existed (they only have the old singular "role" field).
+    async for u in db.users.find({"roles": {"$exists": False}, "role": {"$exists": True}}):
+        await db.users.update_one({"_id": u["_id"]}, {"$set": {"roles": [u["role"]]}})
 
     # One-time migration: renumber students to CKM-10001 sorted by enrollment_date
     migrated = await db.counters.find_one({"key": "student-ckm-migrated"})
@@ -643,6 +665,13 @@ def public_backend_url() -> str:
         or os.environ.get("BACKEND_URL")
         or "http://localhost:8001"
     ).rstrip("/")
+
+def frontend_url() -> str:
+    configured = os.environ.get("FRONTEND_URL") or os.environ.get("PUBLIC_FRONTEND_URL")
+    if configured:
+        return configured.rstrip("/")
+    first_cors_origin = os.environ.get("CORS_ORIGINS", "").split(",")[0].strip()
+    return (first_cors_origin or "http://localhost:3000").rstrip("/")
 
 
 async def portal_pdf_url(student_id: str, doc_type: Literal["invoice", "receipt"], doc_id: str) -> str:
@@ -908,10 +937,12 @@ async def login(payload: LoginIn, response: Response):
     user = await db.users.find_one({"email": email})
     if not user or not verify_password(payload.password, user["password_hash"]):
         raise HTTPException(401, "Invalid email or password")
-    token = create_access_token(str(user["_id"]), email, user["role"])
+    roles = user.get("roles") or ([user["role"]] if user.get("role") else [])
+    primary_role = user.get("role") or (roles[0] if roles else "")
+    token = create_access_token(str(user["_id"]), email, primary_role, roles)
     response.set_cookie("access_token", token, httponly=True, secure=COOKIE_SECURE, samesite="lax",
                         max_age=12 * 3600, path="/")
-    return {"id": str(user["_id"]), "email": email, "name": user["name"], "role": user["role"]}
+    return {"id": str(user["_id"]), "email": email, "name": user["name"], "role": primary_role, "roles": roles}
 
 @api.post("/auth/logout")
 async def logout(response: Response, _: dict = Depends(get_current_user)):
@@ -921,6 +952,60 @@ async def logout(response: Response, _: dict = Depends(get_current_user)):
 @api.get("/auth/me")
 async def me(user: dict = Depends(get_current_user)):
     return user
+
+PASSWORD_RESET_TTL_MINUTES = 30
+
+@api.post("/auth/forgot-password")
+async def forgot_password(payload: ForgotPasswordIn):
+    """Always responds the same way whether or not the email is registered,
+    so this endpoint can't be used to enumerate which emails have accounts."""
+    generic_response = {"ok": True, "message": "If an account exists for that email, we've sent a password reset link."}
+    email = payload.email.lower()
+    user = await db.users.find_one({"email": email})
+    if not user:
+        return generic_response
+
+    jti = secrets.token_urlsafe(24)
+    exp = now_utc() + timedelta(minutes=PASSWORD_RESET_TTL_MINUTES)
+    reset_token = jwt.encode(
+        {"sub": str(user["_id"]), "type": "password_reset", "jti": jti, "exp": exp},
+        JWT_SECRET, algorithm=JWT_ALGO,
+    )
+    # Storing the jti (and requiring it to match on reset) means requesting a
+    # new link invalidates any older one, and using a link once burns it -
+    # without needing a separate token-blacklist collection.
+    await db.users.update_one({"_id": user["_id"]}, {"$set": {"password_reset_jti": jti}})
+
+    reset_url = f"{frontend_url()}/reset-password?token={reset_token}"
+    _notify_safely("password_reset email", send_template_email, email, "password_reset", {
+        "name": user.get("name", ""),
+        "reset_url": reset_url,
+    })
+    return generic_response
+
+@api.post("/auth/reset-password")
+async def reset_password(payload: ResetPasswordIn):
+    if len(payload.new_password) < 8:
+        raise HTTPException(400, "Password must be at least 8 characters")
+    try:
+        decoded = jwt.decode(payload.token, JWT_SECRET, algorithms=[JWT_ALGO])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(400, "This reset link has expired. Please request a new one.")
+    except jwt.InvalidTokenError:
+        raise HTTPException(400, "This reset link is invalid. Please request a new one.")
+    if decoded.get("type") != "password_reset":
+        raise HTTPException(400, "This reset link is invalid. Please request a new one.")
+
+    user = await db.users.find_one({"_id": oid(decoded["sub"], "user id")})
+    if not user or not decoded.get("jti") or user.get("password_reset_jti") != decoded.get("jti"):
+        raise HTTPException(400, "This reset link has already been used or is invalid. Please request a new one.")
+
+    await db.users.update_one(
+        {"_id": user["_id"]},
+        {"$set": {"password_hash": hash_password(payload.new_password), "updated_at": iso(now_utc())},
+         "$unset": {"password_reset_jti": ""}},
+    )
+    return {"ok": True}
 
 @api.get("/health")
 async def health():
@@ -939,11 +1024,15 @@ async def list_users(_: dict = Depends(require_role("director"))):
 
 @api.post("/users")
 async def create_user(payload: UserCreate, _: dict = Depends(require_role("director"))):
-    if payload.role not in ROLES:
-        raise HTTPException(400, "Invalid role")
+    roles = list(dict.fromkeys(payload.roles))  # de-dupe, keep order
+    if not roles:
+        raise HTTPException(400, "Select at least one role")
+    invalid = [r for r in roles if r not in ROLES]
+    if invalid:
+        raise HTTPException(400, f"Invalid role(s): {', '.join(invalid)}")
     if await db.users.find_one({"email": payload.email.lower()}):
         raise HTTPException(400, "Email already exists")
-    doc = {"email": payload.email.lower(), "name": payload.name, "role": payload.role,
+    doc = {"email": payload.email.lower(), "name": payload.name, "role": roles[0], "roles": roles,
            "password_hash": hash_password(payload.password), "created_at": iso(now_utc())}
     res = await db.users.insert_one(doc)
     return serialize_doc({**doc, "_id": res.inserted_id, "password_hash": None})
@@ -971,19 +1060,25 @@ async def update_user(uid: str, payload: UserUpdate, user: dict = Depends(requir
                 raise HTTPException(400, "Cannot change the primary admin account's email")
             updates["email"] = new_email
 
-    if payload.role is not None:
-        if payload.role not in ROLES:
-            raise HTTPException(400, "Invalid role")
-        if payload.role != target["role"]:
+    if payload.roles is not None:
+        roles = list(dict.fromkeys(payload.roles))
+        if not roles:
+            raise HTTPException(400, "Select at least one role")
+        invalid = [r for r in roles if r not in ROLES]
+        if invalid:
+            raise HTTPException(400, f"Invalid role(s): {', '.join(invalid)}")
+        current_roles = target.get("roles") or ([target["role"]] if target.get("role") else [])
+        if set(roles) != set(current_roles):
             if target["email"] == "admin@chessklub.in":
                 raise HTTPException(400, "Cannot change the primary admin account's role")
-            if str(target["_id"]) == user["id"] and payload.role != "director":
+            if str(target["_id"]) == user["id"] and "director" not in roles:
                 remaining_directors = await db.users.count_documents(
-                    {"role": "director", "_id": {"$ne": oid(uid)}}
+                    {"roles": "director", "_id": {"$ne": oid(uid)}}
                 )
                 if remaining_directors == 0:
                     raise HTTPException(400, "Cannot remove the last director account")
-            updates["role"] = payload.role
+            updates["roles"] = roles
+            updates["role"] = roles[0]
 
     if payload.password:
         if len(payload.password) < 8:
@@ -999,7 +1094,15 @@ async def update_user(uid: str, payload: UserUpdate, user: dict = Depends(requir
     return serialize_doc(updated)
 
 @api.delete("/users/{uid}")
-async def delete_user(uid: str, _: dict = Depends(require_role("director"))):
+async def delete_user(uid: str, user: dict = Depends(require_role("director"))):
+    target = await db.users.find_one({"_id": oid(uid)})
+    if not target:
+        raise HTTPException(404, "User not found")
+    target_roles = target.get("roles") or ([target["role"]] if target.get("role") else [])
+    if "director" in target_roles:
+        remaining_directors = await db.users.count_documents({"roles": "director", "_id": {"$ne": oid(uid)}})
+        if remaining_directors == 0:
+            raise HTTPException(400, "Cannot delete the last director account")
     await db.users.delete_one({"_id": oid(uid)})
     return {"ok": True}
 
@@ -1556,7 +1659,10 @@ async def _build_invoice_doc(payload: InvoiceIn, user: dict) -> dict:
     student = await db.students.find_one({"_id": oid(payload.student_id)})
     if not student:
         raise HTTPException(404, "Student not found")
-    total = round(sum(i.amount for i in payload.items), 2)
+    items_total = round(sum(i.amount for i in payload.items), 2)
+    # Never let a discount make the invoice negative or exceed what's actually owed.
+    discount = round(min(max(float(payload.discount or 0), 0), items_total), 2)
+    total = round(items_total - discount, 2)
     inv = {
         "invoice_no": await gen_invoice_no(),
         "student_id": payload.student_id,
@@ -1567,6 +1673,8 @@ async def _build_invoice_doc(payload: InvoiceIn, user: dict) -> dict:
         "period": payload.period,
         "due_date": payload.due_date,
         "items": [i.model_dump() for i in payload.items],
+        "items_total": items_total,
+        "discount": discount,
         "amount": total,
         "paid": 0.0,
         "balance": total,
@@ -1700,6 +1808,7 @@ async def create_invoice(payload: InvoiceIn, user: dict = Depends(require_role("
             period=payload.period,
             due_date=payload.due_date,
             items=[*payload.items, *carry_items],
+            discount=payload.discount,
             notes=payload.notes,
         )
     inv = await _build_invoice_doc(payload, user)
@@ -2351,13 +2460,19 @@ def _build_promotion_certificate_pdf(student: dict, old_level: str, new_level: s
     buf.seek(0)
     return buf.read()
 
-@api.get("/invoices/{iid}/pdf")
-async def invoice_pdf(iid: str, user: dict = Depends(get_current_user)):
-    inv = await db.invoices.find_one({"_id": oid(iid)})
-    if not inv: raise HTTPException(404, "Invoice not found")
+def _invoice_pdf_bytes(inv: dict) -> bytes:
+    """Shared by the authenticated and portal invoice-PDF endpoints so both
+    stay in sync - previously each duplicated this construction, which is
+    exactly how the discount/notes fields could silently end up shown on one
+    and not the other."""
     rows = [[i["description"], f"{i['amount']:.2f}"] for i in inv["items"]]
-    totals = [
-        ["Subtotal", f"INR {inv['amount']:.2f}"],
+    items_total = inv.get("items_total", sum(i["amount"] for i in inv["items"]))
+    discount = inv.get("discount", 0) or 0
+    totals = [["Subtotal", f"INR {items_total:.2f}"]]
+    if discount:
+        totals.append(["Discount", f"- INR {discount:.2f}"])
+    totals += [
+        ["Total", f"INR {inv['amount']:.2f}"],
         ["Paid", f"INR {inv.get('paid', 0):.2f}"],
         ["Balance Due", f"INR {inv['balance']:.2f}"],
     ]
@@ -2366,12 +2481,17 @@ async def invoice_pdf(iid: str, user: dict = Depends(get_current_user)):
         f"Period: {inv.get('period')}",
         f"Due Date: {inv.get('due_date')}",
     ]
-    footer = [
-        "This is a computer-generated invoice.",
-        "For queries, contact the academy office.",
-    ]
-    pdf = _build_pdf("INVOICE", inv["invoice_no"], inv["issued_at"][:10], student_lines, rows, totals, footer,
-                     qr_value=invoice_upi_url(inv))
+    footer = ["This is a computer-generated invoice.", "For queries, contact the academy office."]
+    if inv.get("notes"):
+        footer = [f"Notes: {inv['notes']}", ""] + footer
+    return _build_pdf("INVOICE", inv["invoice_no"], inv["issued_at"][:10], student_lines, rows, totals, footer,
+                      qr_value=invoice_upi_url(inv))
+
+@api.get("/invoices/{iid}/pdf")
+async def invoice_pdf(iid: str, user: dict = Depends(get_current_user)):
+    inv = await db.invoices.find_one({"_id": oid(iid)})
+    if not inv: raise HTTPException(404, "Invoice not found")
+    pdf = _invoice_pdf_bytes(inv)
     return StreamingResponse(io.BytesIO(pdf), media_type="application/pdf",
                              headers={"Content-Disposition": f'inline; filename="{inv["invoice_no"]}.pdf"'})
 
@@ -3359,20 +3479,7 @@ async def portal_invoice_pdf(token: str, iid: str):
     inv = await db.invoices.find_one({"_id": oid(iid)})
     if not inv or inv.get("student_id") != sid:
         raise HTTPException(404, "Invoice not found")
-    rows = [[i["description"], f"{i['amount']:.2f}"] for i in inv["items"]]
-    totals = [
-        ["Subtotal", f"INR {inv['amount']:.2f}"],
-        ["Paid", f"INR {inv.get('paid', 0):.2f}"],
-        ["Balance Due", f"INR {inv['balance']:.2f}"],
-    ]
-    student_lines = [
-        f"<b>{inv.get('student_name')}</b> ({inv.get('student_code')})",
-        f"Period: {inv.get('period')}",
-        f"Due Date: {inv.get('due_date')}",
-    ]
-    footer = ["This is a computer-generated invoice.", "For queries, contact the academy office."]
-    pdf = _build_pdf("INVOICE", inv["invoice_no"], inv["issued_at"][:10], student_lines, rows, totals, footer,
-                     qr_value=invoice_upi_url(inv))
+    pdf = _invoice_pdf_bytes(inv)
     return StreamingResponse(io.BytesIO(pdf), media_type="application/pdf",
                              headers={"Content-Disposition": f'inline; filename="{inv["invoice_no"]}.pdf"'})
 

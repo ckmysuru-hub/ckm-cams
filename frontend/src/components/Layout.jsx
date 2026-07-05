@@ -1,6 +1,7 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
 import { Logo } from "@/components/Brand";
+import { isDirector, formatRoles } from "@/lib/roles";
 import {
   LayoutDashboard, Users, Calendar, ClipboardCheck, GraduationCap,
   ReceiptText, Settings, LogOut, FileText, ScanLine, Inbox, MessageCircle, BarChart3, PartyPopper
@@ -25,7 +26,7 @@ const NAV = [
 export default function Layout() {
   const { user, logout } = useAuth();
   const nav = useNavigate();
-  const visibleNav = NAV.filter((item) => !item.directorOnly || user?.role === "director");
+  const visibleNav = NAV.filter((item) => !item.directorOnly || isDirector(user));
 
   return (
     <div className="min-h-screen flex" data-testid="app-shell">
@@ -62,7 +63,7 @@ export default function Layout() {
         <div className="px-5 py-4 border-t border-white/5">
           <div className="text-xs text-white/50 mb-2">Signed in as</div>
           <div className="text-sm text-white font-medium" data-testid="current-user-name">{user?.name}</div>
-          <div className="text-xs text-white/50 capitalize mb-3">{user?.role?.replace("_", " ")}</div>
+          <div className="text-xs text-white/50 capitalize mb-3">{formatRoles(user)}</div>
           <button
             data-testid="logout-btn"
             onClick={async () => { await logout(); nav("/login"); }}
@@ -79,7 +80,7 @@ export default function Layout() {
           <div className="flex items-center gap-3 min-w-0">
             <div className="text-right min-w-0">
               <div className="text-xs font-semibold truncate max-w-[130px]" data-testid="current-user-name-mobile">{user?.name}</div>
-              <div className="text-[10px] text-[var(--ck-muted)] capitalize truncate">{user?.role?.replace("_", " ")}</div>
+              <div className="text-[10px] text-[var(--ck-muted)] capitalize truncate">{formatRoles(user)}</div>
             </div>
             <button
               data-testid="logout-btn-mobile"

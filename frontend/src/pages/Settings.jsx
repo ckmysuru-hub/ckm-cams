@@ -3,24 +3,37 @@ import { api, formatApiError } from "@/lib/api";
 import PageHeader from "@/components/PageHeader";
 import PhoneNumberInput from "@/components/PhoneNumberInput";
 import { useAuth } from "@/contexts/AuthContext";
+import { isDirector, ROLES, ROLE_LABELS } from "@/lib/roles";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { UserPlus, Trash2, CheckCircle2, XCircle, Send, Loader2, Pencil } from "lucide-react";
 import { toast } from "sonner";
 
-const ROLES = ["director","ops_manager","coach","front_desk","finance"];
+function RoleCheckboxes({ value, onChange, testIdPrefix }) {
+  const toggle = (role) =>
+    onChange(value.includes(role) ? value.filter((r) => r !== role) : [...value, role]);
+  return (
+    <div className="grid grid-cols-2 gap-2 mt-1.5">
+      {ROLES.map((r) => (
+        <label key={r} className="flex items-center gap-2 text-sm border border-[var(--ck-line)] rounded-md px-2.5 py-2 cursor-pointer hover:border-[var(--ck-orange)]">
+          <input type="checkbox" checked={value.includes(r)} onChange={() => toggle(r)} data-testid={`${testIdPrefix}-${r}`} />
+          {ROLE_LABELS[r]}
+        </label>
+      ))}
+    </div>
+  );
+}
 
 export default function Settings() {
   const { user } = useAuth();
   const [academy, setAcademy] = useState(null);
   const [users, setUsers] = useState([]);
   const [open, setOpen] = useState(false);
-  const [form, setForm] = useState({ name:"", email:"", password:"", role:"front_desk" });
+  const [form, setForm] = useState({ name:"", email:"", password:"", roles:["front_desk"] });
   const [editOpen, setEditOpen] = useState(false);
   const [editingId, setEditingId] = useState(null);
-  const [editForm, setEditForm] = useState({ name:"", email:"", password:"", role:"front_desk" });
+  const [editForm, setEditForm] = useState({ name:"", email:"", password:"", roles:["front_desk"] });
   const [editSaving, setEditSaving] = useState(false);
   const [testForm, setTestForm] = useState({ to_phone: "", to_email: "", message: "Hello from Chess Klub Mysuru CAMS — this is a test message." });
   const [testing, setTesting] = useState(false);
@@ -28,34 +41,38 @@ export default function Settings() {
 
   useEffect(() => {
     api.get("/settings/academy").then((r)=>setAcademy(r.data));
-    if (user?.role === "director") api.get("/users").then((r)=>setUsers(r.data));
+    if (isDirector(user)) api.get("/users").then((r)=>setUsers(r.data));
   }, [user]);
 
   const submit = async (e) => {
     e.preventDefault();
+    if (!form.roles.length) { toast.error("Select at least one role"); return; }
     try {
       await api.post("/users", form);
       toast.success("User added");
-      setOpen(false); setForm({ name:"", email:"", password:"", role:"front_desk" });
+      setOpen(false); setForm({ name:"", email:"", password:"", roles:["front_desk"] });
       api.get("/users").then((r)=>setUsers(r.data));
     } catch (ex) { toast.error(formatApiError(ex.response?.data?.detail)); }
   };
 
   const del = async (id) => {
     if (!window.confirm("Delete user?")) return;
-    await api.delete(`/users/${id}`);
-    api.get("/users").then((r)=>setUsers(r.data));
+    try {
+      await api.delete(`/users/${id}`);
+      api.get("/users").then((r)=>setUsers(r.data));
+    } catch (ex) { toast.error(formatApiError(ex.response?.data?.detail)); }
   };
 
   const openEdit = (u) => {
     setEditingId(u.id);
-    setEditForm({ name: u.name || "", email: u.email || "", password: "", role: u.role || "front_desk" });
+    setEditForm({ name: u.name || "", email: u.email || "", password: "", roles: u.roles?.length ? u.roles : (u.role ? [u.role] : ["front_desk"]) });
     setEditOpen(true);
   };
 
   const submitEdit = async (e) => {
     e.preventDefault();
-    const payload = { name: editForm.name, email: editForm.email, role: editForm.role };
+    if (!editForm.roles.length) { toast.error("Select at least one role"); return; }
+    const payload = { name: editForm.name, email: editForm.email, roles: editForm.roles };
     if (editForm.password) payload.password = editForm.password;
     setEditSaving(true);
     try {
@@ -114,7 +131,7 @@ export default function Settings() {
         </div>
       </div>
 
-      {user?.role === "director" && (
+      {isDirector(user) && (
         <div className="ck-card-elevated p-5 mb-6" data-testid="notify-test-card">
           <div className="text-xs uppercase tracking-wider font-semibold text-[var(--ck-muted)]">Live test</div>
           <div className="ck-display text-xl font-semibold mb-1">Send a test notification</div>
@@ -172,7 +189,7 @@ export default function Settings() {
         </div>
       )}
 
-      {user?.role === "director" && (
+      {isDirector(user) && (
         <div className="ck-card-elevated p-2">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-3">
             <div>
@@ -190,13 +207,8 @@ export default function Settings() {
                   <div><Label className="text-xs">Email</Label><Input data-testid="uf-email" type="email" value={form.email} onChange={(e)=>setForm({...form, email:e.target.value})} required /></div>
                   <div><Label className="text-xs">Password</Label><Input data-testid="uf-password" type="password" value={form.password} onChange={(e)=>setForm({...form, password:e.target.value})} required /></div>
                   <div>
-                    <Label className="text-xs">Role</Label>
-                    <Select value={form.role} onValueChange={(v)=>setForm({...form, role:v})}>
-                      <SelectTrigger data-testid="uf-role"><SelectValue /></SelectTrigger>
-                      <SelectContent>
-                        {ROLES.map((r)=>(<SelectItem key={r} value={r}>{r.replace("_"," ")}</SelectItem>))}
-                      </SelectContent>
-                    </Select>
+                    <Label className="text-xs">Roles</Label>
+                    <RoleCheckboxes value={form.roles} onChange={(roles)=>setForm({...form, roles})} testIdPrefix="uf-role" />
                   </div>
                   <div className="flex justify-end gap-2">
                     <button type="button" className="ck-btn-ghost" onClick={()=>setOpen(false)}>Cancel</button>
@@ -213,7 +225,13 @@ export default function Settings() {
                 <tr key={u.id}>
                   <td className="px-4 py-3">{u.name}</td>
                   <td>{u.email}</td>
-                  <td><span className="ck-pill ck-pill-orange">{u.role?.replace("_"," ")}</span></td>
+                  <td>
+                    <div className="flex flex-wrap gap-1">
+                      {(u.roles?.length ? u.roles : (u.role ? [u.role] : [])).map((r) => (
+                        <span key={r} className="ck-pill ck-pill-orange">{r.replace("_"," ")}</span>
+                      ))}
+                    </div>
+                  </td>
                   <td className="text-right pr-4">
                     <div className="flex items-center justify-end gap-3">
                       <button onClick={()=>openEdit(u)} className="text-[var(--ck-muted)] hover:text-[var(--ck-accent,#2563eb)]" data-testid={`edit-user-${u.id}`}><Pencil size={14}/></button>
@@ -239,13 +257,8 @@ export default function Settings() {
                          value={editForm.password} onChange={(e)=>setEditForm({...editForm, password:e.target.value})} />
                 </div>
                 <div>
-                  <Label className="text-xs">Role</Label>
-                  <Select value={editForm.role} onValueChange={(v)=>setEditForm({...editForm, role:v})}>
-                    <SelectTrigger data-testid="uef-role"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      {ROLES.map((r)=>(<SelectItem key={r} value={r}>{r.replace("_"," ")}</SelectItem>))}
-                    </SelectContent>
-                  </Select>
+                  <Label className="text-xs">Roles</Label>
+                  <RoleCheckboxes value={editForm.roles} onChange={(roles)=>setEditForm({...editForm, roles})} testIdPrefix="uef-role" />
                 </div>
                 <div className="flex justify-end gap-2">
                   <button type="button" className="ck-btn-ghost" onClick={()=>setEditOpen(false)}>Cancel</button>

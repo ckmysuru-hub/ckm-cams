@@ -3,6 +3,7 @@ import { api, formatApiError, BACKEND_URL, pdfUrl } from "@/lib/api";
 import PageHeader from "@/components/PageHeader";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Plus, FileText, Bell, IndianRupee, Trash2, Search, Filter, Download, CalendarPlus } from "lucide-react";
@@ -26,7 +27,7 @@ export default function Billing() {
   const [payOpen, setPayOpen] = useState(null); // invoice
   const [form, setForm] = useState({
     student_id: "", period: monthStr(), due_date: today(),
-    items: [{ description: "Monthly Tuition Fee", amount: 0 }], notes: ""
+    items: [{ description: "Monthly Tuition Fee", amount: 0 }], discount: 0, notes: ""
   });
   const [pay, setPay] = useState({ amount: 0, mode: "cash", transaction_ref: "" });
   const [q, setQ] = useState("");
@@ -77,14 +78,21 @@ export default function Billing() {
     setForm((f)=>({ ...f, items: f.items.map((it,i)=> i===idx ? { ...it, [key]: key==="amount"?Number(val||0):val } : it) }));
   const rmItem = (idx) => setForm((f)=>({ ...f, items: f.items.filter((_,i)=>i!==idx) }));
 
-  const total = form.items.reduce((a,b)=>a + Number(b.amount||0), 0);
+  const itemsTotal = form.items.reduce((a,b)=>a + Number(b.amount||0), 0);
+  const discount = Math.min(Math.max(Number(form.discount || 0), 0), itemsTotal);
+  const total = itemsTotal - discount;
+
+  const emptyInvoiceForm = () => ({
+    student_id: "", period: monthStr(), due_date: today(),
+    items: [{ description: "Monthly Tuition Fee", amount: 0 }], discount: 0, notes: ""
+  });
 
   const submit = async (e) => {
     e.preventDefault();
     try {
       await api.post("/invoices", form);
       toast.success("Invoice created");
-      setOpen(false); load();
+      setOpen(false); setForm(emptyInvoiceForm()); load();
     } catch (ex) { toast.error(formatApiError(ex.response?.data?.detail)); }
   };
 
@@ -117,7 +125,7 @@ export default function Billing() {
     if (filterStatus !== "all" && inv.status !== filterStatus) return false;
     if (q) {
       const needle = q.toLowerCase();
-      const hay = `${inv.invoice_no} ${inv.student_name} ${inv.student_code || ""}`.toLowerCase();
+      const hay = `${inv.invoice_no} ${inv.student_name} ${inv.student_code || ""} ${inv.parent_whatsapp || ""}`.toLowerCase();
       if (!hay.includes(needle)) return false;
     }
     return true;
@@ -126,8 +134,8 @@ export default function Billing() {
 
   const exportCsv = () => {
     const rows = sorted.map((i) => ({
-      invoice_no: i.invoice_no, student_name: i.student_name, period: i.period,
-      due_date: i.due_date, amount: i.amount, paid: i.paid, balance: i.balance,
+      invoice_no: i.invoice_no, student_name: i.student_name, parent_phone: i.parent_whatsapp || "", period: i.period,
+      due_date: i.due_date, amount: i.amount, discount: i.discount || 0, paid: i.paid, balance: i.balance,
       status: i.status, issued_at: (i.issued_at || "").slice(0,10),
     }));
     if (!rows.length) { toast.error("Nothing to export"); return; }
@@ -198,7 +206,25 @@ export default function Billing() {
                       <button type="button" onClick={()=>rmItem(idx)} className="col-span-1 text-[var(--ck-muted)] hover:text-red-600"><Trash2 size={14}/></button>
                     </div>
                   ))}
-                  <div className="text-right text-sm mt-2">Total: <span className="ck-display text-xl font-semibold ml-2">{fmt(total)}</span></div>
+
+                  <div className="mt-3 max-w-[200px]">
+                    <Field label="Discount (₹, optional)">
+                      <Input data-testid="if-discount" type="number" min="0" max={itemsTotal} step="1"
+                             value={form.discount} onChange={(e)=>setForm({...form, discount: Number(e.target.value || 0)})} />
+                    </Field>
+                  </div>
+
+                  <div className="text-right text-sm mt-3 space-y-1">
+                    <div className="text-[var(--ck-muted)]">Subtotal: {fmt(itemsTotal)}</div>
+                    {discount > 0 && <div className="text-[var(--ck-muted)]">Discount: - {fmt(discount)}</div>}
+                    <div>Total: <span className="ck-display text-xl font-semibold ml-2">{fmt(total)}</span></div>
+                  </div>
+                </div>
+
+                <div>
+                  <Label className="text-xs font-semibold uppercase tracking-wider text-[var(--ck-muted)]">Notes (optional)</Label>
+                  <Textarea data-testid="if-notes" rows={2} placeholder="Visible to staff and printed on the invoice PDF"
+                            value={form.notes} onChange={(e)=>setForm({...form, notes: e.target.value})} className="mt-1.5" />
                 </div>
 
                 <div className="flex justify-end gap-2">
@@ -216,7 +242,7 @@ export default function Billing() {
         <div className="flex items-center gap-2 flex-1 min-w-[220px]">
           <Search size={16} className="text-[var(--ck-muted)]" />
           <input
-            placeholder="Search invoice no or student…"
+            placeholder="Search invoice no, student or phone…"
             value={q}
             onChange={(e)=>setQ(e.target.value)}
             className="flex-1 outline-none bg-transparent text-sm"
@@ -243,6 +269,7 @@ export default function Billing() {
             <tr className="text-left">
               <SortableHead className="px-4 py-3" label="Invoice" sortKey="invoice_no" sort={sort} onSort={setSort} />
               <SortableHead label="Student" sortKey="student_name" sort={sort} onSort={setSort} />
+              <th>Parent Phone</th>
               <SortableHead label="Period" sortKey="period" sort={sort} onSort={setSort} />
               <SortableHead label="Due" sortKey="due_date" sort={sort} onSort={setSort} />
               <SortableHead className="text-right" label="Amount" sortKey="amount" sort={sort} onSort={setSort} />
@@ -255,6 +282,7 @@ export default function Billing() {
               <tr key={inv.id}>
                 <td className="px-4 py-3 font-mono text-xs">{inv.invoice_no}</td>
                 <td>{inv.student_name}</td>
+                <td className="text-[var(--ck-muted)] text-xs font-mono">{inv.parent_whatsapp || "—"}</td>
                 <td className="text-[var(--ck-muted)]">{inv.period}</td>
                 <td className="text-[var(--ck-muted)]">{inv.due_date}</td>
                 <td className="text-right">{fmt(inv.amount)}</td>
@@ -286,7 +314,7 @@ export default function Billing() {
                 </td>
               </tr>
             ))}
-            {!sorted.length && (<tr><td colSpan="7" className="text-center text-[var(--ck-muted)] py-8">No invoices match the current filters.</td></tr>)}
+            {!sorted.length && (<tr><td colSpan="8" className="text-center text-[var(--ck-muted)] py-8">No invoices match the current filters.</td></tr>)}
           </tbody>
         </table>
       </div>

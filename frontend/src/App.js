@@ -3,6 +3,7 @@ import "@/App.css";
 import { AuthProvider, useAuth } from "@/contexts/AuthContext";
 import Layout from "@/components/Layout";
 import Login from "@/pages/Login";
+import ResetPassword from "@/pages/ResetPassword";
 import Dashboard from "@/pages/Dashboard";
 import Students from "@/pages/Students";
 import StudentDetail from "@/pages/StudentDetail";
@@ -21,6 +22,7 @@ import Reports from "@/pages/Reports";
 import Events from "@/pages/Events";
 import EventDetail from "@/pages/EventDetail";
 import PublicEvent from "@/pages/PublicEvent";
+import { isDirector } from "@/lib/roles";
 
 function Protected({ children }) {
   const { user, ready } = useAuth();
@@ -31,7 +33,7 @@ function Protected({ children }) {
 
 function DirectorOnly({ children }) {
   const { user } = useAuth();
-  if (user?.role !== "director") return <Navigate to="/" replace />;
+  if (!isDirector(user)) return <Navigate to="/" replace />;
   return children;
 }
 
@@ -41,6 +43,7 @@ function App() {
       <AuthProvider>
         <Routes>
           <Route path="/login" element={<Login />} />
+          <Route path="/reset-password" element={<ResetPassword />} />
           <Route path="/kiosk" element={<Kiosk />} />
           <Route path="/portal/:token" element={<ParentPortal />} />
           <Route path="/register" element={<Register />} />

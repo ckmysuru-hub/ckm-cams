@@ -220,6 +220,15 @@ EMAIL_TEMPLATES = {
             <p style="color:#777">Sent from Chess Klub Mysuru CAMS.</p>
         """,
     },
+    "password_reset": {
+        "subject": "Reset your {academy_name} CAMS password",
+        "html": """
+            <p>Hi {name},</p>
+            <p>We received a request to reset your password. Click below to choose a new one - this link expires in 30 minutes and can only be used once.</p>
+            <p><a href="{reset_url}" style="display:inline-block;background:#ea580c;color:#ffffff;padding:10px 20px;border-radius:6px;text-decoration:none;font-weight:bold;">Reset password</a></p>
+            <p style="color:#777;font-size:13px;">If you didn't request this, you can safely ignore this email - your password will not be changed.</p>
+        """,
+    },
     "student_promoted": {
         "subject": "Promotion update for {student_name} - {academy_name}",
         "html": """
