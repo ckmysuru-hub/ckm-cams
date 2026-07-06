@@ -50,6 +50,7 @@ from email import encoders
 from email.utils import formataddr
 from urllib.parse import quote
 from email_templates import render_email_template
+from tournament_pairing import generate_swiss_pairings, calc_tiebreaks
 
 # ---------------------------- Setup ----------------------------
 def configure_logging() -> logging.Logger:
@@ -374,6 +375,14 @@ async def startup():
     await db.users.create_index("email", unique=True)
     await db.students.create_index("student_code", unique=True, sparse=True)
     await db.invoices.create_index("invoice_no", unique=True, sparse=True)
+    await db.tournament_tournaments.create_index("id", unique=True)
+    await db.tournament_players.create_index([("tournament_id", 1), ("id", 1)], unique=True)
+    await db.tournament_players.create_index([("tournament_id", 1), ("fide_id", 1)])
+    await db.tournament_rounds.create_index([("tournament_id", 1), ("round_number", 1)], unique=True)
+    await db.tournament_pairings.create_index([("tournament_id", 1), ("round_number", 1), ("board_number", 1)])
+    await db.tournament_audit_logs.create_index("tournament_id")
+    await db.tournament_registrations.create_index("id", unique=True)
+    await db.tournament_registrations.create_index("razorpay_order_id")
     await db.receipts.create_index("receipt_no", unique=True, sparse=True)
     await db.attendance.create_index([("batch_id", 1), ("session_date", 1)], unique=True)
     await db.checkins.create_index([("student_id", 1), ("check_in_date", 1)], unique=True)
@@ -3045,7 +3054,7 @@ async def razorpay_webhook(request: Request):
     event = body.get("event")
     await db.razorpay_events.insert_one({"event": event, "received_at": iso(now_utc()), "payload": body})
 
-    if event not in ("payment_link.paid", "payment.captured"):
+    if event not in ("payment_link.paid", "payment.captured", "order.paid"):
         return {"status": "ignored", "event": event}
 
     link_entity = ((body.get("payload") or {}).get("payment_link") or {}).get("entity") or {}
@@ -3081,7 +3090,17 @@ async def razorpay_webhook(request: Request):
     try:
         amount_rupees = round(float(amount_paise) / 100.0, 2)
 
-        if kind == "event_registration" or (registration_id and not invoice_id):
+        if kind == "tournament_registration":
+            reg = await db.tournament_registrations.find_one({"id": registration_id})
+            if not reg:
+                logger.warning(f"Razorpay webhook: tournament registration {registration_id} not found")
+                return {"status": "ignored", "reason": "registration_not_found"}
+            if reg.get("status") == "paid":
+                return {"status": "ok", "already_settled": True}
+            await _apply_tournament_registration_payment(reg, razorpay_payment_id)
+            return {"status": "ok"}
+
+        if kind == "event_registration" or (kind is None and registration_id and not invoice_id):
             try:
                 reg = await db.event_registrations.find_one({"_id": oid(registration_id)})
             except HTTPException:
@@ -4084,6 +4103,640 @@ async def register_for_event(eid: str, payload: PublicEventRegistrationIn):
                 "note": "Online payment is temporarily unavailable - our team will follow up to collect the fee."}
     return {"registration_id": saved["id"], "registration_no": saved["registration_no"],
             "payment_required": True, "payment_link_url": link["url"]}
+
+
+# ============================================================================
+# Tournament Management
+#
+# Merged in from the standalone "CK Mysuru Tournament Manager" app. Notable
+# adaptations from the original:
+#   - Auth: the source app had its own users/roles (chief_arbiter, organiser,
+#     deputy_arbiter, federation_admin) and its own login. That's replaced
+#     entirely by this app's existing director-only auth (require_role) -
+#     there is no separate tournament login.
+#   - Collections: every tournament collection is prefixed `tournament_` so
+#     nothing collides with this app's own `registrations`, `audit_logs`, or
+#     `users` collections, which already mean something completely different
+#     here.
+#   - IDs: kept as UUID strings (make_id()) exactly as the source app used
+#     them, rather than converting to this app's Mongo ObjectId convention -
+#     the pairing/standings/TRF export logic all key off plain string ids,
+#     and there's no benefit to changing that.
+#   - Payments: the source app used Razorpay Orders + Checkout.js (a modal
+#     payment flow), which is different from this app's own Payment Links
+#     flow used for invoices/events. Rather than force one flow onto the
+#     other, the Orders flow is kept as-is (it's a proven, working flow) and
+#     reimplemented with plain `requests` instead of the `razorpay` SDK so no
+#     new dependency is needed. The Razorpay webhook is shared with the rest
+#     of the app (see razorpay_webhook) via a "kind" marker in the notes.
+#   - Email: the source app's own Gmail-SMTP sender is dropped in favour of
+#     this app's existing send_template_email/send_email.
+# ============================================================================
+
+def make_id() -> str:
+    return str(uuid.uuid4())
+
+def _tournament_clean(obj):
+    """Recursively strip MongoDB ObjectIds & non-serializable types from
+    arbitrary before/after audit payloads."""
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return {k: _tournament_clean(v) for k, v in obj.items() if k != "_id"}
+    if isinstance(obj, list):
+        return [_tournament_clean(x) for x in obj]
+    if isinstance(obj, (str, int, float, bool)):
+        return obj
+    return str(obj)
+
+async def _tournament_audit(tournament_id: Optional[str], user: dict, action: str,
+                            entity_type: str, entity_id: Optional[str], before=None, after=None):
+    await db.tournament_audit_logs.insert_one({
+        "id": make_id(),
+        "tournament_id": tournament_id,
+        "user_id": user.get("id"),
+        "user_email": user.get("email"),
+        "user_role": user.get("role"),
+        "action": action,
+        "entity_type": entity_type,
+        "entity_id": entity_id,
+        "before": _tournament_clean(before),
+        "after": _tournament_clean(after),
+        "created_at": iso(now_utc()),
+    })
+
+class TournamentIn(BaseModel):
+    name: str
+    organising_body: str = "Chess Klub Mysuru"
+    venue: str = ""
+    start_date: str
+    end_date: str
+    num_rounds: int = 7
+    time_control: str = "90+30"
+    chief_arbiter_name: str = ""
+    rating_type: str = "FIDE Standard"
+    tiebreak_order: List[str] = ["buchholz", "sb", "direct_encounter"]
+    bye_type: str = "half"  # half / full / zero
+    allow_late_entries_until_round: int = 1
+    sections: List[str] = ["Open"]
+    fee_structure: Dict[str, float] = {}
+    notes: str = ""
+    public_visible: bool = True
+
+class TournamentPlayerIn(BaseModel):
+    first_name: str
+    last_name: str
+    fide_id: str = ""
+    federation: str = "IND"
+    title: str = ""
+    fide_rating: int = 0
+    rapid_rating: int = 0
+    blitz_rating: int = 0
+    national_rating: int = 0
+    dob: str = ""
+    gender: str = ""
+    club: str = ""
+    email: str = ""
+    phone: str = ""
+    category: str = "Open"
+    section: str = "Open"
+    payment_status: str = "unpaid"  # unpaid / paid / cash / waived
+    notes: str = ""
+    status: str = "active"  # active / withdrawn
+
+class TournamentResultIn(BaseModel):
+    pairing_id: str
+    result: str  # '1-0', '0-1', '0.5-0.5', '1-0F', '0-1F', '0-0F'
+
+@api.get("/tournaments")
+async def list_tournaments(_: dict = Depends(require_role("director"))):
+    return await db.tournament_tournaments.find({}, {"_id": 0}).sort("start_date", -1).to_list(200)
+
+@api.post("/tournaments")
+async def create_tournament(payload: TournamentIn, user: dict = Depends(require_role("director"))):
+    doc = payload.model_dump()
+    doc["id"] = make_id()
+    doc["slug"] = doc["id"][:8]
+    doc["status"] = "upcoming"
+    doc["current_round"] = 0
+    doc["created_by"] = user["id"]
+    doc["created_at"] = iso(now_utc())
+    await db.tournament_tournaments.insert_one(doc)
+    await _tournament_audit(doc["id"], user, "tournament_create", "tournament", doc["id"], after=doc)
+    doc.pop("_id", None)
+    return doc
+
+@api.get("/tournaments/{tid}")
+async def get_tournament(tid: str, _: dict = Depends(require_role("director"))):
+    t = await db.tournament_tournaments.find_one({"id": tid}, {"_id": 0})
+    if not t:
+        raise HTTPException(404, "Not found")
+    return t
+
+@api.patch("/tournaments/{tid}")
+async def update_tournament(tid: str, payload: dict, user: dict = Depends(require_role("director"))):
+    t = await db.tournament_tournaments.find_one({"id": tid})
+    if not t:
+        raise HTTPException(404, "Not found")
+    allowed = {"name", "venue", "num_rounds", "time_control", "chief_arbiter_name", "tiebreak_order",
+              "bye_type", "notes", "public_visible", "status", "sections", "fee_structure"}
+    upd = {k: v for k, v in payload.items() if k in allowed}
+    await db.tournament_tournaments.update_one({"id": tid}, {"$set": upd})
+    await _tournament_audit(tid, user, "tournament_update", "tournament", tid, before=_tournament_clean(t), after=upd)
+    return await db.tournament_tournaments.find_one({"id": tid}, {"_id": 0})
+
+# ---- players ----
+@api.get("/tournaments/{tid}/players")
+async def list_tournament_players(tid: str, _: dict = Depends(require_role("director"))):
+    return await db.tournament_players.find({"tournament_id": tid}, {"_id": 0}).sort([("fide_rating", -1)]).to_list(2000)
+
+@api.post("/tournaments/{tid}/players")
+async def add_tournament_player(tid: str, payload: TournamentPlayerIn, user: dict = Depends(require_role("director"))):
+    if payload.fide_id and await db.tournament_players.find_one({"tournament_id": tid, "fide_id": payload.fide_id}):
+        raise HTTPException(409, "FIDE ID already registered in this tournament")
+    doc = payload.model_dump()
+    doc.update({"id": make_id(), "tournament_id": tid, "points": 0.0, "color_history": [],
+               "opponents": [], "byes": 0, "created_at": iso(now_utc())})
+    await db.tournament_players.insert_one(doc)
+    await _tournament_audit(tid, user, "player_add", "player", doc["id"], after=doc)
+    doc.pop("_id", None)
+    return doc
+
+@api.patch("/tournaments/{tid}/players/{pid}")
+async def update_tournament_player(tid: str, pid: str, payload: dict, user: dict = Depends(require_role("director"))):
+    p = await db.tournament_players.find_one({"id": pid, "tournament_id": tid})
+    if not p:
+        raise HTTPException(404, "Not found")
+    allowed = {"first_name", "last_name", "fide_id", "federation", "title", "fide_rating",
+              "rapid_rating", "blitz_rating", "national_rating", "dob", "gender", "club",
+              "email", "phone", "category", "section", "payment_status", "notes", "status"}
+    upd = {k: v for k, v in payload.items() if k in allowed}
+    await db.tournament_players.update_one({"id": pid}, {"$set": upd})
+    await _tournament_audit(tid, user, "player_update", "player", pid, before=_tournament_clean(p), after=upd)
+    return await db.tournament_players.find_one({"id": pid}, {"_id": 0})
+
+@api.delete("/tournaments/{tid}/players/{pid}")
+async def delete_tournament_player(tid: str, pid: str, user: dict = Depends(require_role("director"))):
+    p = await db.tournament_players.find_one({"id": pid, "tournament_id": tid})
+    if not p:
+        raise HTTPException(404, "Not found")
+    await db.tournament_players.delete_one({"id": pid})
+    await _tournament_audit(tid, user, "player_delete", "player", pid, before=_tournament_clean(p))
+    return {"ok": True}
+
+@api.post("/tournaments/{tid}/players/import-csv")
+async def import_tournament_players_csv(tid: str, file: UploadFile = File(...), user: dict = Depends(require_role("director"))):
+    content = (await file.read()).decode("utf-8", errors="ignore")
+    reader = csv.DictReader(io.StringIO(content))
+    added, errors = 0, []
+    for i, row in enumerate(reader, start=2):
+        try:
+            fn = (row.get("first_name") or row.get("First Name") or "").strip()
+            if not fn:
+                errors.append({"row": i, "error": "missing first_name"})
+                continue
+            fide_id = (row.get("fide_id") or row.get("FIDE ID") or "").strip()
+            if fide_id and await db.tournament_players.find_one({"tournament_id": tid, "fide_id": fide_id}):
+                errors.append({"row": i, "error": f"duplicate FIDE ID {fide_id}"})
+                continue
+            doc = {
+                "id": make_id(), "tournament_id": tid,
+                "first_name": fn, "last_name": (row.get("last_name") or row.get("Last Name") or "").strip(),
+                "fide_id": fide_id, "federation": (row.get("federation") or "IND").strip(),
+                "title": (row.get("title") or "").strip(),
+                "fide_rating": int(row.get("fide_rating") or row.get("Rating") or 0 or 0),
+                "rapid_rating": 0, "blitz_rating": 0, "national_rating": 0,
+                "dob": (row.get("dob") or "").strip(), "gender": (row.get("gender") or "").strip(),
+                "club": (row.get("club") or "").strip(), "email": (row.get("email") or "").strip(),
+                "phone": (row.get("phone") or "").strip(),
+                "category": (row.get("category") or "Open").strip(), "section": (row.get("section") or "Open").strip(),
+                "payment_status": (row.get("payment_status") or "unpaid").strip(),
+                "notes": "", "status": "active", "points": 0.0, "color_history": [], "opponents": [],
+                "byes": 0, "created_at": iso(now_utc()),
+            }
+            await db.tournament_players.insert_one(doc)
+            added += 1
+        except Exception as e:
+            errors.append({"row": i, "error": str(e)})
+    await _tournament_audit(tid, user, "players_import", "tournament", tid, after={"added": added, "errors": len(errors)})
+    return {"added": added, "errors": errors}
+
+# ---- rounds & pairings ----
+@api.get("/tournaments/{tid}/rounds")
+async def list_tournament_rounds(tid: str, _: dict = Depends(require_role("director"))):
+    return await db.tournament_rounds.find({"tournament_id": tid}, {"_id": 0}).sort("round_number", 1).to_list(50)
+
+async def _get_tournament_round_pairings(tid: str, rnum: int):
+    prs = await db.tournament_pairings.find({"tournament_id": tid, "round_number": rnum}, {"_id": 0}).sort("board_number", 1).to_list(2000)
+    pids = {p["white_player_id"] for p in prs} | {p["black_player_id"] for p in prs if p.get("black_player_id")}
+    players = await db.tournament_players.find({"id": {"$in": list(pids)}}, {"_id": 0}).to_list(2000)
+    pmap = {p["id"]: p for p in players}
+    for pr in prs:
+        pr["white"] = pmap.get(pr["white_player_id"])
+        pr["black"] = pmap.get(pr["black_player_id"]) if pr.get("black_player_id") else None
+    rnd = await db.tournament_rounds.find_one({"tournament_id": tid, "round_number": rnum}, {"_id": 0})
+    return {"round": rnd, "pairings": prs}
+
+@api.get("/tournaments/{tid}/rounds/{rnum}/pairings")
+async def get_tournament_round_pairings(tid: str, rnum: int, _: dict = Depends(require_role("director"))):
+    return await _get_tournament_round_pairings(tid, rnum)
+
+@api.post("/tournaments/{tid}/rounds/{rnum}/pair")
+async def pair_tournament_round(tid: str, rnum: int, user: dict = Depends(require_role("director"))):
+    t = await db.tournament_tournaments.find_one({"id": tid})
+    if not t:
+        raise HTTPException(404, "Tournament not found")
+    if rnum < 1 or rnum > t["num_rounds"]:
+        raise HTTPException(400, "Round out of range")
+    if rnum > 1:
+        prev = await db.tournament_rounds.find_one({"tournament_id": tid, "round_number": rnum - 1})
+        if not prev or prev["status"] != "closed":
+            raise HTTPException(400, f"Round {rnum-1} must be closed first")
+    existing = await db.tournament_rounds.find_one({"tournament_id": tid, "round_number": rnum})
+    if existing and existing["status"] not in ("pending",):
+        raise HTTPException(400, f"Round {rnum} already paired")
+
+    players = await db.tournament_players.find({"tournament_id": tid, "status": "active"}).to_list(2000)
+    p_in, past_opps, byes = [], {}, {}
+    for p in players:
+        p_in.append({"id": p["id"], "rating": p.get("fide_rating") or 0, "points": p.get("points", 0.0),
+                    "color_history": p.get("color_history", []), "pairing_number": 0})
+        past_opps[p["id"]] = set(p.get("opponents", []))
+        byes[p["id"]] = p.get("byes", 0)
+
+    pairings, bye_id = generate_swiss_pairings(p_in, past_opps, byes)
+
+    await db.tournament_pairings.delete_many({"tournament_id": tid, "round_number": rnum})
+    docs = []
+    for i, pr in enumerate(pairings, start=1):
+        docs.append({"id": make_id(), "tournament_id": tid, "round_number": rnum, "board_number": i,
+                    "white_player_id": pr["white"], "black_player_id": pr["black"],
+                    "result": "", "is_bye": False, "created_at": iso(now_utc())})
+    if bye_id:
+        docs.append({"id": make_id(), "tournament_id": tid, "round_number": rnum, "board_number": len(pairings) + 1,
+                    "white_player_id": bye_id, "black_player_id": None,
+                    "result": "BYE", "is_bye": True, "created_at": iso(now_utc())})
+    if docs:
+        await db.tournament_pairings.insert_many(docs)
+    await db.tournament_rounds.update_one(
+        {"tournament_id": tid, "round_number": rnum},
+        {"$set": {"tournament_id": tid, "round_number": rnum, "status": "paired", "started_at": iso(now_utc())}},
+        upsert=True,
+    )
+    await db.tournament_tournaments.update_one({"id": tid}, {"$set": {"current_round": rnum, "status": "in_progress"}})
+    await _tournament_audit(tid, user, "pairings_generate", "round", str(rnum),
+                            after={"pairings": len(pairings), "bye": bool(bye_id)})
+    return await _get_tournament_round_pairings(tid, rnum)
+
+@api.post("/tournaments/{tid}/rounds/{rnum}/results")
+async def submit_tournament_result(tid: str, rnum: int, payload: TournamentResultIn,
+                                   user: dict = Depends(require_role("director"))):
+    pr = await db.tournament_pairings.find_one({"id": payload.pairing_id, "tournament_id": tid, "round_number": rnum})
+    if not pr:
+        raise HTTPException(404, "Pairing not found")
+    valid = {"1-0", "0-1", "0.5-0.5", "1-0F", "0-1F", "0-0F", ""}
+    if payload.result not in valid:
+        raise HTTPException(400, "Invalid result")
+    before = pr.get("result")
+    await db.tournament_pairings.update_one({"id": payload.pairing_id},
+                                            {"$set": {"result": payload.result, "updated_at": iso(now_utc()), "updated_by": user["id"]}})
+    await _tournament_audit(tid, user, "result_entry", "pairing", payload.pairing_id,
+                            before={"result": before}, after={"result": payload.result})
+    return {"ok": True}
+
+@api.post("/tournaments/{tid}/rounds/{rnum}/close")
+async def close_tournament_round(tid: str, rnum: int, user: dict = Depends(require_role("director"))):
+    prs = await db.tournament_pairings.find({"tournament_id": tid, "round_number": rnum}).to_list(2000)
+    if not prs:
+        raise HTTPException(400, "No pairings exist")
+    incomplete = [p for p in prs if not p.get("is_bye") and not p.get("result")]
+    if incomplete:
+        raise HTTPException(400, f"{len(incomplete)} board(s) missing result")
+    t = await db.tournament_tournaments.find_one({"id": tid})
+    bye_pts = {"half": 0.5, "full": 1.0, "zero": 0.0}.get(t.get("bye_type", "half"), 0.5)
+    for pr in prs:
+        wpid, bpid = pr["white_player_id"], pr.get("black_player_id")
+        if pr.get("is_bye"):
+            await db.tournament_players.update_one({"id": wpid}, {"$inc": {"points": bye_pts, "byes": 1}})
+            continue
+        r = pr.get("result", "")
+        wpts, bpts = {"1-0": (1, 0), "1-0F": (1, 0), "0-1": (0, 1), "0-1F": (0, 1),
+                     "0.5-0.5": (0.5, 0.5), "0-0F": (0, 0)}.get(r, (0, 0))
+        await db.tournament_players.update_one({"id": wpid}, {"$inc": {"points": wpts},
+                                                              "$push": {"color_history": "W", "opponents": bpid}})
+        await db.tournament_players.update_one({"id": bpid}, {"$inc": {"points": bpts},
+                                                              "$push": {"color_history": "B", "opponents": wpid}})
+    await db.tournament_rounds.update_one({"tournament_id": tid, "round_number": rnum},
+                                          {"$set": {"status": "closed", "closed_at": iso(now_utc())}})
+    if rnum >= t["num_rounds"]:
+        await db.tournament_tournaments.update_one({"id": tid}, {"$set": {"status": "completed"}})
+    await _tournament_audit(tid, user, "round_close", "round", str(rnum))
+    return {"ok": True}
+
+# ---- standings ----
+async def _tournament_standings(tid: str):
+    players = await db.tournament_players.find({"tournament_id": tid}, {"_id": 0}).to_list(2000)
+    prs = await db.tournament_pairings.find({"tournament_id": tid}, {"_id": 0}).to_list(5000)
+    rounds_closed = await db.tournament_rounds.find({"tournament_id": tid, "status": "closed"}, {"_id": 0}).to_list(50)
+    closed_set = {r["round_number"] for r in rounds_closed}
+    rbp: Dict[str, list] = {}
+    for pr in prs:
+        if pr.get("round_number") not in closed_set:
+            continue
+        if pr.get("is_bye"):
+            rbp.setdefault(pr["white_player_id"], []).append({"is_bye": True, "result_score": 0.5, "opponent_id": None})
+            continue
+        r = pr.get("result", "")
+        wpid, bpid = pr["white_player_id"], pr["black_player_id"]
+        if r in ("1-0", "1-0F"):
+            rbp.setdefault(wpid, []).append({"opponent_id": bpid, "result_score": 1, "is_bye": False})
+            rbp.setdefault(bpid, []).append({"opponent_id": wpid, "result_score": 0, "is_bye": False})
+        elif r in ("0-1", "0-1F"):
+            rbp.setdefault(wpid, []).append({"opponent_id": bpid, "result_score": 0, "is_bye": False})
+            rbp.setdefault(bpid, []).append({"opponent_id": wpid, "result_score": 1, "is_bye": False})
+        elif r == "0.5-0.5":
+            rbp.setdefault(wpid, []).append({"opponent_id": bpid, "result_score": 0.5, "is_bye": False})
+            rbp.setdefault(bpid, []).append({"opponent_id": wpid, "result_score": 0.5, "is_bye": False})
+
+    inp = [{"id": p["id"], "name": f"{p['first_name']} {p['last_name']}".strip(),
+           "rating": p.get("fide_rating", 0), "title": p.get("title", ""),
+           "federation": p.get("federation", ""), "points": p.get("points", 0.0),
+           "section": p.get("section", "Open")} for p in players]
+    enriched = calc_tiebreaks(inp, rbp)
+
+    def sort_key(p):
+        return (-p["points"], -p["buchholz"], -p["sb"], -p["rating"])
+    enriched.sort(key=sort_key)
+    out, i = [], 0
+    while i < len(enriched):
+        j = i
+        while j + 1 < len(enriched) and sort_key(enriched[i])[:3] == sort_key(enriched[j + 1])[:3]:
+            j += 1
+        rank_label = f"{i+1}" if i == j else f"{i+1}-{j+1}"
+        for k in range(i, j + 1):
+            out.append({**enriched[k], "rank": rank_label})
+        i = j + 1
+    return out
+
+@api.get("/tournaments/{tid}/standings")
+async def tournament_standings(tid: str, _: dict = Depends(require_role("director"))):
+    return await _tournament_standings(tid)
+
+@api.get("/tournaments/{tid}/audit")
+async def get_tournament_audit(tid: str, _: dict = Depends(require_role("director"))):
+    raw = await db.tournament_audit_logs.find({"tournament_id": tid}, {"_id": 0}).sort("created_at", -1).to_list(500)
+    return [_tournament_clean(x) for x in raw]
+
+# ---- exports ----
+@api.get("/tournaments/{tid}/export/csv")
+async def export_tournament_csv(tid: str, _: dict = Depends(require_role("director"))):
+    standing = await _tournament_standings(tid)
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["Rank", "Name", "Title", "Federation", "Rating", "Points", "Buchholz", "SB"])
+    for s in standing:
+        w.writerow([s["rank"], s["name"], s.get("title", ""), s.get("federation", ""),
+                   s.get("rating", 0), s.get("points", 0), s.get("buchholz", 0), s.get("sb", 0)])
+    buf.seek(0)
+    return StreamingResponse(iter([buf.getvalue()]), media_type="text/csv",
+                             headers={"Content-Disposition": f"attachment; filename=standings_{tid[:8]}.csv"})
+
+@api.get("/tournaments/{tid}/export/trf16")
+async def export_tournament_trf16(tid: str, _: dict = Depends(require_role("director"))):
+    """FIDE TRF16 format export."""
+    t = await db.tournament_tournaments.find_one({"id": tid})
+    if not t:
+        raise HTTPException(404)
+    players = await db.tournament_players.find({"tournament_id": tid}).sort("fide_rating", -1).to_list(2000)
+    rounds = await db.tournament_rounds.find({"tournament_id": tid, "status": "closed"}, {"_id": 0}).to_list(50)
+    closed = {r["round_number"] for r in rounds}
+    prs = await db.tournament_pairings.find({"tournament_id": tid}, {"_id": 0}).to_list(5000)
+    sn_map = {p["id"]: i + 1 for i, p in enumerate(players)}
+
+    lines = [
+        f'012 {t["name"]}', f'022 {t.get("venue","")}', '032 IND',
+        f'042 {t.get("start_date","")}', f'052 {t.get("end_date","")}',
+        f"062 {len(players)}", f"072 {len(players)}", f'082 {len(t.get("sections", ["Open"]))}',
+        "092 Swiss System (Dutch)", f'102 {t.get("chief_arbiter_name","")}', f'122 {t.get("time_control","")}',
+    ]
+    for p in players:
+        sn = sn_map[p["id"]]
+        name = f"{p.get('last_name','')},{p.get('first_name','')}"[:33].ljust(33)
+        title = (p.get("title") or "").ljust(3)
+        fed = (p.get("federation") or "IND").ljust(3)
+        rating = str(p.get("fide_rating", 0)).rjust(4)
+        fide_id = (p.get("fide_id") or "").rjust(11)
+        dob = (p.get("dob") or "").ljust(10)
+        pts = f'{p.get("points", 0):.1f}'.rjust(4)
+        line = f"001 {sn:>4} {title} {name} {fed} {rating} {fide_id} {dob} {pts} {sn:>4}"
+        for rn in range(1, t["num_rounds"] + 1):
+            if rn not in closed:
+                line += "  0000 - -"
+                continue
+            mine = next((x for x in prs if x["round_number"] == rn and
+                        (x["white_player_id"] == p["id"] or x.get("black_player_id") == p["id"])), None)
+            if not mine:
+                line += "  0000 - -"
+                continue
+            if mine.get("is_bye"):
+                line += "  0000 - H"
+                continue
+            is_white = mine["white_player_id"] == p["id"]
+            opp_id = mine.get("black_player_id") if is_white else mine["white_player_id"]
+            opp_sn = sn_map.get(opp_id, 0)
+            color = "w" if is_white else "b"
+            r = mine.get("result", "")
+            score = "-"
+            if r in ("1-0", "1-0F"):
+                score = "1" if is_white else "0"
+            elif r in ("0-1", "0-1F"):
+                score = "0" if is_white else "1"
+            elif r == "0.5-0.5":
+                score = "="
+            line += f"  {opp_sn:>4} {color} {score}"
+        lines.append(line)
+    content = "\n".join(lines) + "\n"
+    return StreamingResponse(iter([content]), media_type="text/plain",
+                             headers={"Content-Disposition": f"attachment; filename=trf16_{tid[:8]}.txt"})
+
+# ---- public: browse a tournament ----
+@api.get("/public/tournaments/{tid}")
+async def public_tournament_view(tid: str):
+    t = await db.tournament_tournaments.find_one({"id": tid}, {"_id": 0})
+    if not t or not t.get("public_visible", True):
+        raise HTTPException(404)
+    standing = await _tournament_standings(tid)
+    rounds = await db.tournament_rounds.find({"tournament_id": tid}, {"_id": 0}).sort("round_number", 1).to_list(50)
+    pairings_by_round = {r["round_number"]: (await _get_tournament_round_pairings(tid, r["round_number"]))["pairings"] for r in rounds}
+    return {"tournament": t, "standings": standing, "rounds": rounds, "pairings_by_round": pairings_by_round}
+
+@api.get("/public/tournaments/{tid}/registration-info")
+async def public_tournament_registration_info(tid: str):
+    t = await db.tournament_tournaments.find_one({"id": tid}, {"_id": 0})
+    if not t:
+        raise HTTPException(404)
+    return {
+        "tournament": {
+            "id": t["id"], "name": t["name"], "venue": t.get("venue", ""),
+            "start_date": t.get("start_date"), "end_date": t.get("end_date"),
+            "sections": t.get("sections", ["Open"]), "fee_structure": t.get("fee_structure", {}),
+            "time_control": t.get("time_control"), "rating_type": t.get("rating_type"),
+            "num_rounds": t.get("num_rounds"), "chief_arbiter_name": t.get("chief_arbiter_name", ""),
+        },
+        "razorpay_key_id": os.environ.get("RAZORPAY_KEY_ID", ""),
+        "razorpay_configured": razorpay_enabled(),
+    }
+
+# ---- public: self-registration + payment (Razorpay Orders/Checkout flow) ----
+class PublicTournamentRegisterIn(BaseModel):
+    tournament_id: str
+    first_name: str
+    last_name: str
+    fide_id: str = ""
+    federation: str = "IND"
+    title: str = ""
+    fide_rating: int = 0
+    dob: str = ""
+    gender: str = ""
+    club: str = ""
+    email: EmailStr
+    phone: str = ""
+    category: str = "Open"
+    section: str = "Open"
+
+class TournamentPaymentVerifyIn(BaseModel):
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
+    registration_id: str
+
+def _create_tournament_razorpay_order(amount_rupees: float, receipt: str, notes: dict) -> dict:
+    """Razorpay Order (not Payment Link) - this flow uses Checkout.js on the
+    frontend, matching how the original tournament app's registration page
+    was built. Implemented with plain requests (no razorpay SDK dependency,
+    consistent with the rest of this app's Razorpay integration)."""
+    if not razorpay_enabled():
+        raise RuntimeError("razorpay_not_configured")
+    body = {"amount": int(round(amount_rupees * 100)), "currency": "INR",
+            "receipt": receipt[:40], "payment_capture": 1, "notes": notes}
+    r = requests.post(f"{RAZORPAY_API_BASE}/orders", auth=_razorpay_auth(), json=body, timeout=15)
+    if not r.ok:
+        raise RuntimeError(f"razorpay order create failed [{r.status_code}]: {r.text}")
+    return r.json()
+
+def _verify_tournament_checkout_signature(order_id: str, payment_id: str, signature: str) -> bool:
+    if not razorpay_enabled():
+        return False
+    body = f"{order_id}|{payment_id}".encode()
+    secret = os.environ.get("RAZORPAY_KEY_SECRET", "").encode()
+    expected = hmac.new(secret, body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature or "")
+
+async def _send_tournament_registration_email(tournament: dict, player: dict, registration: dict, payment_id: str):
+    if not player.get("email"):
+        return
+    public_url = f"{frontend_url()}/public/tournaments/{tournament['id']}"
+    _notify_safely("tournament_registration_confirmed email", send_template_email, player["email"],
+                   "tournament_registration_confirmed", {
+        "name": f"{player.get('first_name','')} {player.get('last_name','')}".strip(),
+        "tournament_name": tournament["name"],
+        "fide_id": player.get("fide_id") or "—",
+        "category": player.get("category", "Open"),
+        "amount": money_text(registration.get("amount", 0)),
+        "payment_id": payment_id,
+        "venue": tournament.get("venue", "TBD"),
+        "dates": f"{tournament.get('start_date','')} to {tournament.get('end_date','')}",
+        "public_url": public_url,
+    })
+    await db.tournament_registrations.update_one({"id": registration["id"]}, {"$set": {"email_sent_at": iso(now_utc())}})
+
+@api.post("/public/tournament-registrations")
+async def register_for_tournament(payload: PublicTournamentRegisterIn):
+    t = await db.tournament_tournaments.find_one({"id": payload.tournament_id})
+    if not t:
+        raise HTTPException(404, "Tournament not found")
+    if payload.fide_id and await db.tournament_players.find_one({"tournament_id": t["id"], "fide_id": payload.fide_id}):
+        raise HTTPException(409, "FIDE ID already registered")
+    if await db.tournament_players.find_one({"tournament_id": t["id"], "email": payload.email,
+                                              "first_name": payload.first_name, "last_name": payload.last_name}):
+        raise HTTPException(409, "Player already registered with this email")
+
+    fee = float(t.get("fee_structure", {}).get(payload.category, 0) or 0)
+    player = payload.model_dump()
+    player.update({"id": make_id(), "tournament_id": t["id"], "payment_status": "paid" if fee == 0 else "unpaid",
+                   "status": "active", "points": 0.0, "color_history": [], "opponents": [], "byes": 0,
+                   "notes": "", "rapid_rating": 0, "blitz_rating": 0, "national_rating": 0,
+                   "created_at": iso(now_utc())})
+    await db.tournament_players.insert_one(player)
+
+    registration = {
+        "id": make_id(), "player_id": player["id"], "tournament_id": t["id"],
+        "amount": fee, "currency": "INR", "status": "pending" if fee > 0 else "free",
+        "razorpay_order_id": None, "razorpay_payment_id": None,
+        "email": payload.email, "email_sent_at": None, "created_at": iso(now_utc()),
+    }
+
+    if fee == 0:
+        registration["status"] = "free"
+        await db.tournament_registrations.insert_one(registration)
+        await _send_tournament_registration_email(t, player, registration, payment_id="FREE")
+        return {"registration_id": registration["id"], "free": True, "amount": 0}
+
+    if not razorpay_enabled():
+        await db.tournament_registrations.insert_one(registration)
+        return {"registration_id": registration["id"], "free": False, "amount": fee,
+                "razorpay_not_configured": True,
+                "message": "Online payment is temporarily unavailable. Please ask the organiser to mark you as cash paid."}
+
+    try:
+        order = _create_tournament_razorpay_order(
+            fee, receipt=registration["id"][:30],
+            notes={"kind": "tournament_registration", "registration_id": registration["id"],
+                  "player_id": player["id"], "tournament_id": t["id"]},
+        )
+        registration["razorpay_order_id"] = order["id"]
+        await db.tournament_registrations.insert_one(registration)
+        return {"registration_id": registration["id"], "free": False, "amount": fee,
+                "razorpay_order_id": order["id"], "razorpay_key_id": os.environ.get("RAZORPAY_KEY_ID", ""),
+                "currency": "INR", "amount_paise": order["amount"]}
+    except Exception as e:
+        logger.exception("tournament razorpay order create failed")
+        raise HTTPException(500, f"Payment initialisation failed: {e}")
+
+@api.post("/public/tournament-registrations/verify-payment")
+async def verify_tournament_payment(payload: TournamentPaymentVerifyIn):
+    reg = await db.tournament_registrations.find_one({"id": payload.registration_id})
+    if not reg:
+        raise HTTPException(404)
+    if reg["razorpay_order_id"] != payload.razorpay_order_id:
+        raise HTTPException(400, "Order mismatch")
+    if not _verify_tournament_checkout_signature(payload.razorpay_order_id, payload.razorpay_payment_id, payload.razorpay_signature):
+        raise HTTPException(400, "Invalid signature")
+    await db.tournament_registrations.update_one({"id": reg["id"]}, {"$set": {
+        "razorpay_payment_id": payload.razorpay_payment_id, "status": "paid", "paid_at": iso(now_utc()),
+    }})
+    await db.tournament_players.update_one({"id": reg["player_id"]}, {"$set": {"payment_status": "paid"}})
+    if reg.get("email_sent_at") is None:
+        t = await db.tournament_tournaments.find_one({"id": reg["tournament_id"]})
+        p = await db.tournament_players.find_one({"id": reg["player_id"]})
+        await _send_tournament_registration_email(t, p, reg, payment_id=payload.razorpay_payment_id)
+    return {"ok": True, "status": "paid"}
+
+async def _apply_tournament_registration_payment(reg: dict, razorpay_payment_id: str) -> None:
+    """Called from the shared Razorpay webhook when a tournament order is
+    paid (order.paid / payment.captured) - covers the case where the
+    Checkout.js client-side handler never fires (tab closed, etc.) so the
+    front-end verify-payment call never happens."""
+    if reg.get("status") == "paid":
+        return
+    await db.tournament_registrations.update_one({"id": reg["id"]}, {"$set": {
+        "status": "paid", "razorpay_payment_id": razorpay_payment_id, "paid_at": iso(now_utc()),
+    }})
+    await db.tournament_players.update_one({"id": reg["player_id"]}, {"$set": {"payment_status": "paid"}})
+    if reg.get("email_sent_at") is None:
+        t = await db.tournament_tournaments.find_one({"id": reg["tournament_id"]})
+        p = await db.tournament_players.find_one({"id": reg["player_id"]})
+        await _send_tournament_registration_email(t, p, reg, payment_id=razorpay_payment_id or "WEBHOOK")
 
 
 app.include_router(api)

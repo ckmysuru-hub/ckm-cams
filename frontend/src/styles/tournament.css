@@ -1,0 +1,90 @@
+/* Styles for the merged Tournament Manager pages, ported from the standalone
+   app. Everything is scoped under .ckm-tournament-scope so it can't leak
+   into the rest of ckm-cams - the original stylesheet styled bare h1-h4 and
+   redefined :root CSS variables globally, which would have reskinned the
+   entire app if imported as-is. */
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+.ckm-tournament-scope {
+    background: #F9FAFB;
+    color: #0A0A0A;
+}
+
+.ckm-tournament-scope h1,
+.ckm-tournament-scope h2,
+.ckm-tournament-scope h3,
+.ckm-tournament-scope h4,
+.ckm-tournament-scope .font-serif {
+    font-family: 'Cormorant Garamond', Georgia, serif;
+    letter-spacing: -0.01em;
+}
+
+.ckm-tournament-scope .font-mono { font-family: 'IBM Plex Mono', monospace; }
+
+.ckm-tournament-scope .brand-bar {
+    background: linear-gradient(90deg, #F57C00 0%, #FF9800 100%);
+    height: 3px;
+}
+
+.ckm-tournament-scope table.ckm-table { width: 100%; border-collapse: collapse; }
+.ckm-tournament-scope table.ckm-table thead th {
+    background: #F9FAFB;
+    border-bottom: 2px solid #111827;
+    text-transform: uppercase;
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    color: #4B5563;
+    padding: 10px 12px;
+    text-align: left;
+    font-weight: 600;
+}
+.ckm-tournament-scope table.ckm-table tbody td {
+    border-bottom: 1px solid #E5E7EB;
+    padding: 10px 12px;
+    font-size: 14px;
+    color: #0A0A0A;
+    font-variant-numeric: tabular-nums;
+}
+.ckm-tournament-scope table.ckm-table tbody tr:hover { background: #FFF8F0; }
+
+.ckm-tournament-scope .dot-w { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #fff; border: 1px solid #111; }
+.ckm-tournament-scope .dot-b { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #111; }
+
+.ckm-tournament-scope .result-select {
+    min-width: 220px;
+    height: 38px;
+    padding: 0 32px 0 12px;
+    border: 2px solid #D1D5DB;
+    border-radius: 4px;
+    background: #fff;
+    color: #6B7280;
+    font-size: 13px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    cursor: pointer;
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236B7280' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+.ckm-tournament-scope .result-select:hover:not(:disabled) { border-color: #6B7280; }
+.ckm-tournament-scope .result-select:focus { outline: none; border-color: #F57C00; box-shadow: 0 0 0 3px #FFE3C6; }
+.ckm-tournament-scope .result-select.has-value { color: #0A0A0A; font-weight: 600; border-color: #F57C00; background-color: #FFF8F0; }
+.ckm-tournament-scope .result-select.is-forfeit { color: #DC2626; border-color: #DC2626; background-color: #FEF2F2; }
+.ckm-tournament-scope .result-select:disabled { opacity: 0.55; cursor: not-allowed; background-color: #F9FAFB; }
+
+@media print {
+    .ckm-tournament-scope nav, .ckm-tournament-scope .no-print, .ckm-tournament-scope button { display: none !important; }
+    .ckm-tournament-scope { background: #fff !important; }
+    .ckm-tournament-scope .print-area { padding: 0 !important; max-width: 100% !important; }
+    .ckm-tournament-scope table.ckm-table thead th { background: #fff; color: #000; border-bottom: 2px solid #000; }
+    .ckm-tournament-scope table.ckm-table tbody td { border-bottom: 1px solid #000; }
+    .ckm-tournament-scope .brand-bar { background: #F57C00 !important; -webkit-print-color-adjust: exact; }
+}
+
+.ckm-tournament-scope .wiz-step { display: flex; align-items: center; gap: 8px; }
+.ckm-tournament-scope .wiz-circle { width: 28px; height: 28px; border-radius: 50%; border: 2px solid #E5E7EB; color: #9CA3AF; display: inline-flex; align-items: center; justify-content: center; font-weight: 600; font-size: 13px; background: #fff; }
+.ckm-tournament-scope .wiz-circle.active { border-color: #F57C00; color: #F57C00; }
+.ckm-tournament-scope .wiz-circle.done { background: #F57C00; border-color: #F57C00; color: #fff; }

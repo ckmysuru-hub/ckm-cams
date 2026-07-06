@@ -22,6 +22,12 @@ import Reports from "@/pages/Reports";
 import Events from "@/pages/Events";
 import EventDetail from "@/pages/EventDetail";
 import PublicEvent from "@/pages/PublicEvent";
+import TournamentList from "@/pages/tournaments/TournamentList";
+import TournamentSetup from "@/pages/tournaments/TournamentSetup";
+import TournamentDetail from "@/pages/tournaments/TournamentDetail";
+import PublicTournament from "@/pages/tournaments/PublicTournament";
+import PublicTournamentRegister from "@/pages/tournaments/PublicTournamentRegister";
+import "@/styles/tournament.css";
 import { isDirector } from "@/lib/roles";
 
 function Protected({ children }) {
@@ -48,6 +54,8 @@ function App() {
           <Route path="/portal/:token" element={<ParentPortal />} />
           <Route path="/register" element={<Register />} />
           <Route path="/events/:id/rsvp" element={<PublicEvent />} />
+          <Route path="/public/tournaments/:id" element={<PublicTournament />} />
+          <Route path="/tournaments/:id/register" element={<PublicTournamentRegister />} />
           <Route element={<Protected><Layout /></Protected>}>
             <Route path="/" element={<Dashboard />} />
             <Route path="/students" element={<Students />} />
@@ -60,6 +68,9 @@ function App() {
             <Route path="/registrations" element={<Registrations />} />
             <Route path="/events" element={<DirectorOnly><Events /></DirectorOnly>} />
             <Route path="/events/:id" element={<DirectorOnly><EventDetail /></DirectorOnly>} />
+            <Route path="/tournaments" element={<DirectorOnly><TournamentList /></DirectorOnly>} />
+            <Route path="/tournaments/new" element={<DirectorOnly><TournamentSetup /></DirectorOnly>} />
+            <Route path="/tournaments/:id" element={<DirectorOnly><TournamentDetail /></DirectorOnly>} />
             <Route path="/whatsapp-messages" element={<DirectorOnly><WhatsAppMessages /></DirectorOnly>} />
             <Route path="/reports" element={<DirectorOnly><Reports /></DirectorOnly>} />
             <Route path="/settings" element={<Settings />} />

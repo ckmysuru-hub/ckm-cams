@@ -213,6 +213,23 @@ EMAIL_TEMPLATES = {
     </p>
         """,
     },
+    "tournament_registration_confirmed": {
+        "subject": "Registration Confirmed - {tournament_name}",
+        "html": """
+            <p>Hi {name},</p>
+            <p>Your registration for <b>{tournament_name}</b> is confirmed.</p>
+            <table style="width:100%;border-collapse:collapse;margin-top:12px;">
+                <tr><td style="padding:4px 0;color:#666;">FIDE ID</td><td style="padding:4px 0;font-weight:600;">{fide_id}</td></tr>
+                <tr><td style="padding:4px 0;color:#666;">Category</td><td style="padding:4px 0;font-weight:600;">{category}</td></tr>
+                <tr><td style="padding:4px 0;color:#666;">Entry Fee Paid</td><td style="padding:4px 0;font-weight:600;">{amount}</td></tr>
+                <tr><td style="padding:4px 0;color:#666;">Payment ID</td><td style="padding:4px 0;font-family:monospace;font-size:12px;">{payment_id}</td></tr>
+                <tr><td style="padding:4px 0;color:#666;">Venue</td><td style="padding:4px 0;">{venue}</td></tr>
+                <tr><td style="padding:4px 0;color:#666;">Dates</td><td style="padding:4px 0;">{dates}</td></tr>
+            </table>
+            <p><a href="{public_url}" style="display:inline-block;background:#ea580c;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;font-weight:bold;margin-top:12px;">View Pairings &amp; Standings</a></p>
+            <p style="color:#999;font-size:12px;margin-top:20px;">This is an automated confirmation. Please carry a printed copy or this email at the venue.</p>
+        """,
+    },
     "notify_test": {
         "subject": "Test email from {academy_name}",
         "html": """
