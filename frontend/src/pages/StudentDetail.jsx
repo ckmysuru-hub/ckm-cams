@@ -146,6 +146,10 @@ export default function StudentDetail() {
 
   if (!s) return <div className="text-sm text-[var(--ck-muted)]">Loading…</div>;
 
+  // Calculate total billed: only include invoices that are paid or pending (excluding cancelled)
+  const billedInvoices = inv.filter(i => i.status !== 'cancelled');
+  const totalBilled = billedInvoices.reduce((a,b)=>a+b.amount,0);
+
   return (
     <>
       <Link to="/students" className="text-xs text-[var(--ck-muted)] flex items-center gap-1 mb-4 hover:text-[var(--ck-orange)]">
@@ -175,7 +179,7 @@ export default function StudentDetail() {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
         <Stat label="Attendance" value={att ? `${att.percentage}%` : "—"} hint={`P ${att?.counts.P||0} · A ${att?.counts.A||0} `} />
-        <Stat label="Total Billed" value={fmtINR(inv.reduce((a,b)=>a+b.amount,0))} hint={`${inv.length} invoices`} />
+        <Stat label="Total Billed" value={fmtINR(totalBilled)} hint={`${billedInvoices.length} invoices`} />
         <Stat label="Pending" value={fmtINR(inv.reduce((a,b)=>a+b.balance,0))} hint="balance outstanding" accent />
       </div>
 

@@ -36,6 +36,10 @@ export default function ParentPortal() {
     : student.subscription_status === "expiring_soon" ? "ck-pill ck-pill-orange"
     : student.subscription_status === "expired" ? "ck-pill ck-pill-red" : "ck-pill ck-pill-black";
 
+  // Calculate total billed: only include invoices that are paid or pending (excluding cancelled)
+  const billedInvoices = invoices.filter(i => i.status !== 'cancelled');
+  const totalBilled = billedInvoices.reduce((a,b)=>a + b.amount,0);
+
   return (
     <div className="min-h-screen" data-testid="portal-page" style={{ background: "var(--ck-cream)" }}>
       <header className="bg-white border-b border-[var(--ck-line)] px-4 sm:px-6 py-5">
@@ -66,7 +70,7 @@ export default function ParentPortal() {
         {/* Stat cards */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
           <StatCard label="Attendance" value={`${attendance.percentage}%`} hint={`${attendance.counts.P + attendance.counts.LT} of ${attendance.counts.P + attendance.counts.A + attendance.counts.L + attendance.counts.LT} sessions`} />
-          <StatCard label="Outstanding" value={fmtINR(invoices.reduce((a,b)=>a + (b.balance||0), 0))} hint={`${invoices.filter(i=>i.status!=='paid').length} pending`} accent />
+          <StatCard label="Total Billed" value={fmtINR(totalBilled)} hint={`${billedInvoices.length} invoices`} accent />
           <StatCard label="Receipts" value={receipts.length} hint="payments received" />
           <StatCard
             label="Subscription"
