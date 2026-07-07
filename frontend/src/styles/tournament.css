@@ -88,3 +88,35 @@
 .ckm-tournament-scope .wiz-circle { width: 28px; height: 28px; border-radius: 50%; border: 2px solid #E5E7EB; color: #9CA3AF; display: inline-flex; align-items: center; justify-content: center; font-weight: 600; font-size: 13px; background: #fff; }
 .ckm-tournament-scope .wiz-circle.active { border-color: #F57C00; color: #F57C00; }
 .ckm-tournament-scope .wiz-circle.done { background: #F57C00; border-color: #F57C00; color: #fff; }
+
+@media (max-width: 767px) {
+  .ckm-tournament-scope table.ckm-table { min-width: 640px; }
+  .ckm-tournament-scope table.ckm-table th,
+  .ckm-tournament-scope table.ckm-table td { white-space: nowrap; }
+
+  /* Form field grids collapse to one column, matching the rest of the app.
+     Scoped to an explicit .ckm-form-grid marker (rather than pattern-matching
+     bare grid-cols-2/3 utility classes) so it can't accidentally catch
+     intentional multi-column layouts like the stat tiles or card grids that
+     happen to also use grid-cols-2 for a different purpose. */
+  .ckm-tournament-scope .ckm-form-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  /* The category/fee builder and player-row layouts use a 12-col grid with
+     a few narrow numeric/action columns - collapsing those to one column
+     would make the row layout illegible, so instead give the label column
+     room to shrink and keep the narrow columns fixed-width. */
+  .ckm-tournament-scope .grid.grid-cols-12 {
+    grid-template-columns: minmax(0, 1fr) 90px 36px !important;
+  }
+
+  .ckm-tournament-scope .result-select { min-width: 0; width: 100%; }
+
+  .ckm-tournament-scope button,
+  .ckm-tournament-scope a.inline-block,
+  .ckm-tournament-scope .wiz-circle ~ button {
+    min-height: 40px;
+  }
+}
+

@@ -111,7 +111,7 @@ export default function EventDetail() {
         }
       />
 
-      <div className="grid sm:grid-cols-4 gap-4 mb-6">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
         <div className="ck-card-elevated p-4">
           <div className="text-xs text-[var(--ck-muted)] mb-1 flex items-center gap-1.5"><Calendar size={12} /> When</div>
           <div className="font-medium text-sm">{fmtWhen(event.event_datetime)}</div>

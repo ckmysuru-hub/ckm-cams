@@ -31,7 +31,7 @@ export default function TournamentDetail() {
           <h1 className="font-serif text-4xl font-bold">{t.name}</h1>
           <p className="text-sm text-gray-500">{t.organising_body} · {t.venue || '—'} · {t.start_date} → {t.end_date}</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap w-full sm:w-auto [&>*]:shrink-0">
           {canEdit && (
             <button onClick={() => setEditing(true)} data-testid="edit-tournament-btn"
               className="text-sm border border-gray-300 px-3 py-2 rounded-sm hover:bg-gray-50 flex items-center gap-1.5">
@@ -50,18 +50,18 @@ export default function TournamentDetail() {
         </div>
       </div>
 
-      <div className="grid grid-cols-4 gap-3 mb-6">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
         <Stat label="Status" value={t.status?.replace('_', ' ')} accent />
         <Stat label="Rounds" value={`${t.current_round} / ${t.num_rounds}`} />
         <Stat label="Time Control" value={t.time_control} />
         <Stat label="Rating" value={t.rating_type} />
       </div>
 
-      <div className="border-b border-gray-200 mb-4 no-print">
-        <div className="flex gap-1">
+      <div className="border-b border-gray-200 mb-4 no-print overflow-x-auto">
+        <div className="flex gap-1 w-max min-w-full">
           {TABS.map(x => (
             <button key={x} onClick={() => setTab(x)} data-testid={`tab-${x.toLowerCase()}`}
-              className={`px-4 py-2 text-sm font-semibold border-b-2 transition-colors ${tab === x ? 'border-[#F57C00] text-[#E65100]' : 'border-transparent text-gray-500 hover:text-gray-800'}`}>
+              className={`px-4 py-2 text-sm font-semibold border-b-2 transition-colors whitespace-nowrap shrink-0 ${tab === x ? 'border-[#F57C00] text-[#E65100]' : 'border-transparent text-gray-500 hover:text-gray-800'}`}>
               {x}
             </button>
           ))}
@@ -110,7 +110,7 @@ function EditTournamentModal({ t, onClose, onSaved }) {
     <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
       <div className="bg-white rounded-sm w-full max-w-2xl p-6 max-h-[90vh] overflow-y-auto">
         <h3 className="font-serif text-2xl mb-4">Edit Tournament</h3>
-        <div className="grid grid-cols-2 gap-3 text-sm">
+        <div className="grid grid-cols-2 gap-3 text-sm ckm-form-grid">
           <div className="col-span-2"><label className={lbl}>Name</label><input data-testid="edit-t-name" value={f.name} onChange={e => set('name', e.target.value)} className={inp} /></div>
           <div className="col-span-2"><label className={lbl}>Venue</label><input value={f.venue} onChange={e => set('venue', e.target.value)} className={inp} /></div>
           <div><label className={lbl}>Rounds</label><input type="number" min={1} max={20} value={f.num_rounds} onChange={e => set('num_rounds', e.target.value)} className={inp} /></div>
@@ -301,7 +301,7 @@ function PlayerModal({ tid, categories, player, onClose, onSaved }) {
     <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
       <div className="bg-white rounded-sm w-full max-w-2xl p-6 max-h-[90vh] overflow-y-auto">
         <h3 className="font-serif text-2xl mb-4">{isEdit ? 'Edit Player' : 'Add Player'}</h3>
-        <div className="grid grid-cols-2 gap-3 text-sm">
+        <div className="grid grid-cols-2 gap-3 text-sm ckm-form-grid">
           {fields.map(([k, l]) => (
             <div key={k}>
               <label className="text-xs uppercase tracking-widest text-gray-500 font-semibold">{l}</label>

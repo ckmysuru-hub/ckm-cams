@@ -1617,7 +1617,16 @@ async def _carry_forward_pending_items(student_id: str, period: Optional[str] = 
         balance = float(inv.get("balance", 0) or 0)
         if amount <= 0 or balance <= 0:
             continue
-        ratio = min(1.0, balance / amount)
+        # Scale against the invoice's pre-discount items total (not its net
+        # `amount`), so a discount applied to the pending invoice is baked
+        # into what's carried forward instead of being discarded. Older
+        # invoices predating the discount field fall back to `amount`
+        # (items_total == amount when there was never a discount to begin
+        # with).
+        items_total = float(inv.get("items_total", amount) or amount)
+        if items_total <= 0:
+            continue
+        ratio = min(1.0, balance / items_total)
         item_total = 0.0
         invoice_items = inv.get("items") or []
         for item in invoice_items:
@@ -3152,6 +3161,38 @@ async def test_notify(payload: TestNotifyIn, _: dict = Depends(require_role("dir
     if payload.to_email:
         out["email"] = send_template_email(payload.to_email, "notify_test", {"message": payload.message or "Test"})
     return out
+
+@api.get("/payments/razorpay/test")
+async def test_razorpay_connection(_: dict = Depends(require_role("director"))):
+    """Verifies RAZORPAY_KEY_ID/RAZORPAY_KEY_SECRET are actually set AND that
+    they authenticate successfully against the real Razorpay API - without
+    creating any real order/charge. Use this to diagnose 'payment isn't
+    working' reports without having to run a full registration end-to-end:
+    if this fails, the problem is credentials/account-level, not app code."""
+    key_id = os.environ.get("RAZORPAY_KEY_ID", "")
+    key_secret = os.environ.get("RAZORPAY_KEY_SECRET", "")
+    if not key_id or not key_secret:
+        missing = [n for n, v in [("RAZORPAY_KEY_ID", key_id), ("RAZORPAY_KEY_SECRET", key_secret)] if not v]
+        return {"configured": False, "connected": False,
+                "message": f"Not configured - missing {', '.join(missing)} in the backend environment."}
+    mode = "live" if key_id.startswith("rzp_live_") else "test" if key_id.startswith("rzp_test_") else "unknown"
+    try:
+        r = requests.get(f"{RAZORPAY_API_BASE}/payments", auth=_razorpay_auth(), params={"count": 1}, timeout=15)
+    except Exception as e:
+        return {"configured": True, "connected": False, "mode": mode,
+                "message": f"Could not reach Razorpay: {e}"}
+    if r.status_code == 401:
+        return {"configured": True, "connected": False, "mode": mode,
+                "message": "Razorpay rejected these credentials (401 Unauthorized). "
+                          "Double-check RAZORPAY_KEY_ID/RAZORPAY_KEY_SECRET match the Key ID/Key Secret "
+                          "pair shown in Razorpay Dashboard → Settings → API Keys, and that they're both "
+                          "from the same mode (Test or Live)."}
+    if not r.ok:
+        return {"configured": True, "connected": False, "mode": mode,
+                "message": f"Razorpay returned an error [{r.status_code}]: {r.text[:300]}"}
+    return {"configured": True, "connected": True, "mode": mode,
+            "message": f"Connected successfully in {mode.upper()} mode. Orders created now will actually charge cards in LIVE mode." if mode == "live"
+                      else f"Connected successfully in {mode.upper()} mode. This is Razorpay's sandbox - no real money moves. Switch to Live keys when you're ready to accept real payments."}
 
 PLAN_DAYS = {"monthly": 30, "quarterly": 90, "annual": 365}
 PLAN_LABELS = {"monthly": "Monthly", "quarterly": "Quarterly", "annual": "Annual"}

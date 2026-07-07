@@ -92,7 +92,7 @@ export default function TournamentSetup() {
             <div><Label>Tournament Name *</Label><Input data-testid="wiz-name" value={form.name} onChange={e => set('name', e.target.value)} maxLength={120} /></div>
             <div><Label>Organising Body</Label><Input value={form.organising_body} onChange={e => set('organising_body', e.target.value)} /></div>
             <div><Label>Venue</Label><Input data-testid="wiz-venue" value={form.venue} onChange={e => set('venue', e.target.value)} /></div>
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-2 gap-4 ckm-form-grid">
               <div><Label>Start Date *</Label><Input data-testid="wiz-start" type="date" value={form.start_date} onChange={e => set('start_date', e.target.value)} /></div>
               <div><Label>End Date *</Label><Input data-testid="wiz-end" type="date" value={form.end_date} onChange={e => set('end_date', e.target.value)} /></div>
             </div>
@@ -101,7 +101,7 @@ export default function TournamentSetup() {
         )}
         {step === 1 && (
           <div className="space-y-4">
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-2 gap-4 ckm-form-grid">
               <div><Label>Number of Rounds</Label><Input data-testid="wiz-rounds" type="number" min={1} max={20} value={form.num_rounds} onChange={e => set('num_rounds', +e.target.value)} /></div>
               <div><Label>Time Control</Label><Input data-testid="wiz-tc" value={form.time_control} onChange={e => set('time_control', e.target.value)} placeholder="90+30" /></div>
             </div>
@@ -159,7 +159,7 @@ export default function TournamentSetup() {
         {step === 3 && (
           <div className="space-y-3 text-sm">
             <div className="font-serif text-2xl mb-3">Confirm</div>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-2 gap-3 ckm-form-grid">
               <div><span className="text-gray-500 text-xs uppercase">Name</span><div className="font-semibold">{form.name}</div></div>
               <div><span className="text-gray-500 text-xs uppercase">Venue</span><div className="font-semibold">{form.venue || '—'}</div></div>
               <div><span className="text-gray-500 text-xs uppercase">Dates</span><div className="font-semibold">{form.start_date} → {form.end_date}</div></div>
