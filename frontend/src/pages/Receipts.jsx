@@ -7,6 +7,8 @@ import { FileText, Search, Filter, Download } from "lucide-react";
 import { downloadCsv } from "@/lib/csv";
 import { SortableHead, applySort } from "@/components/SortableHead";
 import { toast } from "sonner";
+import { usePagination } from "@/lib/usePagination";
+import Pagination from "@/components/Pagination";
 
 const fmt = (n) => `₹${Number(n||0).toLocaleString("en-IN")}`;
 
@@ -28,6 +30,7 @@ export default function Receipts() {
     return true;
   });
   const sorted = applySort(filtered, sort);
+  const { page, setPage, pageSize, setPageSize, pageItems, totalPages, totalItems } = usePagination(sorted, 20);
 
   const exportCsv = () => {
     const rows = sorted.map((r) => ({
@@ -83,7 +86,7 @@ export default function Receipts() {
             </tr>
           </thead>
           <tbody>
-            {sorted.map((r)=>(
+            {pageItems.map((r)=>(
               <tr key={r.id}>
                 <td className="px-4 py-3 font-mono text-xs">{r.receipt_no}</td>
                 <td>{r.student_name}</td>
@@ -102,6 +105,8 @@ export default function Receipts() {
           </tbody>
         </table>
       </div>
+      <Pagination page={page} totalPages={totalPages} totalItems={totalItems}
+                  pageSize={pageSize} setPage={setPage} setPageSize={setPageSize} testId="receipts-pagination" />
     </>
   );
 }

@@ -7,6 +7,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Plus, Users, Pencil, Trash2, MessageCircle, ExternalLink, LayoutGrid, List } from "lucide-react";
 import { toast } from "sonner";
+import { usePagination } from "@/lib/usePagination";
+import Pagination from "@/components/Pagination";
 
 const DAYS = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
 const empty = {
@@ -30,6 +32,7 @@ export default function Batches() {
   const [sendingId, setSendingId] = useState(null);
   const [invitingId, setInvitingId] = useState(null);
   const [view, setView] = useState("grid");
+  const { page, setPage, pageSize, setPageSize, pageItems, totalPages, totalItems } = usePagination(items, 12);
 
   const load = () => api.get("/batches").then((r) => setItems(r.data));
   useEffect(() => {
@@ -186,7 +189,7 @@ export default function Batches() {
 
       {view === "grid" ? (
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" data-testid="batches-grid">
-        {items.map((b)=>(
+        {pageItems.map((b)=>(
           <div key={b.id} className="ck-card-elevated p-5" data-testid={`batch-card-${b.id}`}>
             <div className="flex items-center justify-between mb-2">
               <span className="ck-pill ck-pill-orange">{b.status}</span>
@@ -236,7 +239,7 @@ export default function Batches() {
             </tr>
           </thead>
           <tbody>
-            {items.map((b)=>(
+            {pageItems.map((b)=>(
               <tr key={b.id}>
                 <td className="px-4 py-3">
                   <div className="font-medium">{b.name}</div>
@@ -279,6 +282,8 @@ export default function Batches() {
         </table>
       </div>
       )}
+      <Pagination page={page} totalPages={totalPages} totalItems={totalItems}
+                  pageSize={pageSize} setPage={setPage} setPageSize={setPageSize} testId="batches-pagination" />
     </>
   );
 }

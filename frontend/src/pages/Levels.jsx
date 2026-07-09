@@ -6,6 +6,8 @@ import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Plus, Pencil, Trash2, LayoutGrid, List } from "lucide-react";
 import { toast } from "sonner";
+import { usePagination } from "@/lib/usePagination";
+import Pagination from "@/components/Pagination";
 
 const empty = {
   name:"", code:"", program:"Standard", duration_months:3, sessions_per_week:2,
@@ -31,6 +33,7 @@ export default function Levels() {
   const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState(empty);
   const [view, setView] = useState("grid");
+  const { page, setPage, pageSize, setPageSize, pageItems, totalPages, totalItems } = usePagination(items, 12);
 
   const load = () => api.get("/levels").then((r)=>setItems(r.data));
   useEffect(() => { load(); }, []);
@@ -120,7 +123,7 @@ export default function Levels() {
 
       {view === "grid" ? (
       <div className="grid md:grid-cols-2 gap-4" data-testid="levels-grid">
-        {items.map((l)=>(
+        {pageItems.map((l)=>(
           <div key={l.id} className="ck-card-elevated p-5" data-testid={`level-card-${l.id}`}>
             <div className="flex items-center justify-between mb-1">
               <span className="ck-pill ck-pill-orange">{l.code}</span>
@@ -165,7 +168,7 @@ export default function Levels() {
             </tr>
           </thead>
           <tbody>
-            {items.map((l)=>(
+            {pageItems.map((l)=>(
               <tr key={l.id}>
                 <td className="px-4 py-3"><span className="ck-pill ck-pill-orange">{l.code}</span></td>
                 <td className="font-medium">{l.name}</td>
@@ -192,6 +195,8 @@ export default function Levels() {
         </table>
       </div>
       )}
+      <Pagination page={page} totalPages={totalPages} totalItems={totalItems}
+                  pageSize={pageSize} setPage={setPage} setPageSize={setPageSize} testId="levels-pagination" />
     </>
   );
 }

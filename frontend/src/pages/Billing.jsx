@@ -10,6 +10,8 @@ import { Plus, FileText, Bell, IndianRupee, Trash2, Search, Filter, Download, Ca
 import { toast } from "sonner";
 import { downloadCsv } from "@/lib/csv";
 import { SortableHead, applySort } from "@/components/SortableHead";
+import { usePagination } from "@/lib/usePagination";
+import Pagination from "@/components/Pagination";
 
 const fmt = (n) => `₹${Number(n||0).toLocaleString("en-IN")}`;
 const today = () => new Date().toISOString().slice(0,10);
@@ -131,6 +133,7 @@ export default function Billing() {
     return true;
   });
   const sorted = applySort(filtered, sort);
+  const { page, setPage, pageSize, setPageSize, pageItems, totalPages, totalItems } = usePagination(sorted, 20);
 
   const exportCsv = () => {
     const rows = sorted.map((i) => ({
@@ -278,7 +281,7 @@ export default function Billing() {
             </tr>
           </thead>
           <tbody>
-            {sorted.map((inv)=>(
+            {pageItems.map((inv)=>(
               <tr key={inv.id}>
                 <td className="px-4 py-3 font-mono text-xs">{inv.invoice_no}</td>
                 <td>{inv.student_name}</td>
@@ -318,6 +321,8 @@ export default function Billing() {
           </tbody>
         </table>
       </div>
+      <Pagination page={page} totalPages={totalPages} totalItems={totalItems}
+                  pageSize={pageSize} setPage={setPage} setPageSize={setPageSize} testId="invoices-pagination" />
 
       <Dialog open={!!payOpen} onOpenChange={(o)=> !o && setPayOpen(null)}>
         <DialogContent className="max-w-md">

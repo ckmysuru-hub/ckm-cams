@@ -21,6 +21,8 @@ import { Plus, Search, Pencil, Trash2, Download, Upload, Filter, IdCard, Loader2
 import { toast } from "sonner";
 import { downloadCsv, parseCsv } from "@/lib/csv";
 import { SortableHead, applySort } from "@/components/SortableHead";
+import { usePagination } from "@/lib/usePagination";
+import Pagination from "@/components/Pagination";
 
 const empty = {
   full_name: "", dob: "", gender: "male", parent_name: "", parent_whatsapp: "",
@@ -128,6 +130,7 @@ export default function Students() {
   const sorted = applySort(filtered, sort, {
     level_id: (s) => levelName(s.level_id),
   });
+  const { page, setPage, pageSize, setPageSize, pageItems, totalPages, totalItems } = usePagination(sorted, 20);
 
   const requestLevelChange = (student, nextValue) => {
     const levelId = nextValue === "_none" ? "" : nextValue;
@@ -385,7 +388,7 @@ export default function Students() {
             </tr>
           </thead>
           <tbody>
-            {sorted.map((s) => (
+            {pageItems.map((s) => (
               <tr key={s.id}>
                 <td className="px-4 py-3 font-mono text-xs">{s.student_code}</td>
                 <td>
@@ -444,6 +447,8 @@ export default function Students() {
           </tbody>
         </table>
       </div>
+      <Pagination page={page} totalPages={totalPages} totalItems={totalItems}
+                  pageSize={pageSize} setPage={setPage} setPageSize={setPageSize} testId="students-pagination" />
 
       <AlertDialog open={!!pendingLevel} onOpenChange={(o) => { if (!o && !savingLevel) setPendingLevel(null); }}>
         <AlertDialogContent>
