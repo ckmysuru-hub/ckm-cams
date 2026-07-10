@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
-import { api, formatApiError, BACKEND_URL, pdfUrl } from "@/lib/api";
+import { api, formatApiError } from "@/lib/api";
 import PageHeader from "@/components/PageHeader";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Plus, FileText, Bell, IndianRupee, Trash2, Search, Filter, Download, CalendarPlus } from "lucide-react";
+import { Plus, Bell, IndianRupee, Trash2, Search, Filter, Download, CalendarPlus } from "lucide-react";
 import { toast } from "sonner";
 import { downloadCsv } from "@/lib/csv";
 import { SortableHead, applySort } from "@/components/SortableHead";
@@ -16,6 +16,28 @@ import Pagination from "@/components/Pagination";
 const fmt = (n) => `₹${Number(n||0).toLocaleString("en-IN")}`;
 const today = () => new Date().toISOString().slice(0,10);
 const monthStr = () => new Date().toISOString().slice(0,7);
+const fmtDateTime = (value) => {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value).slice(0, 16).replace("T", " ");
+  return date.toLocaleString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+};
+const downloadBlob = (blob, filename) => {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+};
 const planLabel = (student, level) =>
   student?.payment_plan === "custom" ? (level?.custom_plan_name || "Custom") :
   student?.payment_plan === "quarterly" ? "Quarterly" :
@@ -122,6 +144,15 @@ export default function Billing() {
     await api.delete(`/invoices/${id}`); load();
   };
 
+  const downloadInvoicePdf = async (inv) => {
+    try {
+      const { data } = await api.get(`/invoices/${inv.id}/pdf`, { responseType: "blob" });
+      downloadBlob(data, `${inv.invoice_no || "invoice"}.pdf`);
+    } catch (ex) {
+      toast.error(formatApiError(ex.response?.data?.detail) || "Could not download invoice PDF");
+    }
+  };
+
   // Filter + sort
   const filtered = items.filter((inv) => {
     if (filterStatus !== "all" && inv.status !== filterStatus) return false;
@@ -139,7 +170,8 @@ export default function Billing() {
     const rows = sorted.map((i) => ({
       invoice_no: i.invoice_no, student_name: i.student_name, parent_phone: i.parent_whatsapp || "", period: i.period,
       due_date: i.due_date, amount: i.amount, discount: i.discount || 0, paid: i.paid, balance: i.balance,
-      status: i.status, issued_at: (i.issued_at || "").slice(0,10),
+      status: i.status, reminder_count: i.reminder_count || 0, last_reminded_at: i.last_reminded_at || "",
+      issued_at: (i.issued_at || "").slice(0,10),
     }));
     if (!rows.length) { toast.error("Nothing to export"); return; }
     downloadCsv(rows, `chessklub-invoices-${new Date().toISOString().slice(0,10)}.csv`);
@@ -277,31 +309,41 @@ export default function Billing() {
               <SortableHead label="Due" sortKey="due_date" sort={sort} onSort={setSort} />
               <SortableHead className="text-right" label="Amount" sortKey="amount" sort={sort} onSort={setSort} />
               <SortableHead className="text-right" label="Balance" sortKey="balance" sort={sort} onSort={setSort} />
+              <SortableHead label="Last Reminder" sortKey="last_reminded_at" sort={sort} onSort={setSort} />
               <th className="text-right pr-4">Actions</th>
             </tr>
           </thead>
           <tbody>
             {pageItems.map((inv)=>(
               <tr key={inv.id}>
-                <td className="px-4 py-3 font-mono text-xs">{inv.invoice_no}</td>
+                <td className="px-4 py-3 font-mono text-xs">
+                  <button
+                    type="button"
+                    onClick={()=>downloadInvoicePdf(inv)}
+                    className="font-semibold text-[var(--ck-orange)] hover:underline"
+                    data-testid={`inv-pdf-${inv.id}`}
+                    title="Download invoice PDF"
+                  >
+                    {inv.invoice_no}
+                  </button>
+                </td>
                 <td>{inv.student_name}</td>
                 <td className="text-[var(--ck-muted)] text-xs font-mono">{inv.parent_whatsapp || "—"}</td>
                 <td className="text-[var(--ck-muted)]">{inv.period}</td>
                 <td className="text-[var(--ck-muted)]">{inv.due_date}</td>
                 <td className="text-right">{fmt(inv.amount)}</td>
                 <td className="text-right font-medium">{fmt(inv.balance)}</td>
+                <td className="text-[var(--ck-muted)] text-xs whitespace-nowrap">
+                  {inv.last_reminded_at ? fmtDateTime(inv.last_reminded_at) : "—"}
+                </td>
                 <td className="pr-4">
                   <div className="flex justify-end gap-1">
-                    <a className="att-btn flex items-center gap-1" target="_blank" rel="noreferrer"
-                       href={pdfUrl(`/api/invoices/${inv.id}/pdf`)} data-testid={`inv-pdf-${inv.id}`}>
-                      <FileText size={12}/> PDF
-                    </a>
                     <button
                       className="att-btn flex items-center gap-1"
                       onClick={()=>remind(inv.id)}
                       disabled={inv.status === "paid" || inv.status === "cancelled"}
                       data-testid={`inv-remind-${inv.id}`}
-                      title={`${inv.reminder_count || 0} reminder${Number(inv.reminder_count || 0) === 1 ? "" : "s"} sent`}
+                      title={`${inv.reminder_count || 0} reminder${Number(inv.reminder_count || 0) === 1 ? "" : "s"} sent${inv.last_reminded_at ? ` · Last: ${fmtDateTime(inv.last_reminded_at)}` : ""}`}
                     >
                       <Bell size={12}/> Remind {inv.reminder_count ? `(${inv.reminder_count})` : ""}
                     </button>
@@ -317,7 +359,7 @@ export default function Billing() {
                 </td>
               </tr>
             ))}
-            {!sorted.length && (<tr><td colSpan="8" className="text-center text-[var(--ck-muted)] py-8">No invoices match the current filters.</td></tr>)}
+            {!sorted.length && (<tr><td colSpan="9" className="text-center text-[var(--ck-muted)] py-8">No invoices match the current filters.</td></tr>)}
           </tbody>
         </table>
       </div>

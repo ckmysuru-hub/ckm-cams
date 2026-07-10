@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
-import { api, pdfUrl } from "@/lib/api";
+import { api } from "@/lib/api";
 import PageHeader from "@/components/PageHeader";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { FileText, Search, Filter, Download } from "lucide-react";
+import { Search, Filter, Download } from "lucide-react";
 import { downloadCsv } from "@/lib/csv";
 import { SortableHead, applySort } from "@/components/SortableHead";
 import { toast } from "sonner";
@@ -11,6 +11,16 @@ import { usePagination } from "@/lib/usePagination";
 import Pagination from "@/components/Pagination";
 
 const fmt = (n) => `₹${Number(n||0).toLocaleString("en-IN")}`;
+const downloadBlob = (blob, filename) => {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+};
 
 export default function Receipts() {
   const [items, setItems] = useState([]);
@@ -41,6 +51,15 @@ export default function Receipts() {
     if (!rows.length) { toast.error("Nothing to export"); return; }
     downloadCsv(rows, `chessklub-receipts-${new Date().toISOString().slice(0,10)}.csv`);
     toast.success(`Exported ${rows.length} receipt${rows.length === 1 ? "" : "s"}`);
+  };
+
+  const downloadReceiptPdf = async (receipt) => {
+    try {
+      const { data } = await api.get(`/receipts/${receipt.id}/pdf`, { responseType: "blob" });
+      downloadBlob(data, `${receipt.receipt_no || "receipt"}.pdf`);
+    } catch {
+      toast.error("Could not download receipt PDF");
+    }
   };
 
   return (
@@ -82,26 +101,29 @@ export default function Receipts() {
               <SortableHead label="Date" sortKey="created_at" sort={sort} onSort={setSort} />
               <SortableHead label="Mode" sortKey="mode" sort={sort} onSort={setSort} />
               <SortableHead className="text-right" label="Amount" sortKey="amount" sort={sort} onSort={setSort} />
-              <th className="text-right pr-4">PDF</th>
             </tr>
           </thead>
           <tbody>
             {pageItems.map((r)=>(
               <tr key={r.id}>
-                <td className="px-4 py-3 font-mono text-xs">{r.receipt_no}</td>
+                <td className="px-4 py-3 font-mono text-xs">
+                  <button
+                    type="button"
+                    onClick={()=>downloadReceiptPdf(r)}
+                    className="font-semibold text-[var(--ck-orange)] hover:underline"
+                    data-testid={`rcp-pdf-${r.id}`}
+                    title="Download receipt PDF"
+                  >
+                    {r.receipt_no}
+                  </button>
+                </td>
                 <td>{r.student_name}</td>
                 <td className="text-[var(--ck-muted)]">{r.created_at?.slice(0,10)}</td>
                 <td className="uppercase text-xs">{r.mode}</td>
                 <td className="text-right font-medium">{fmt(r.amount)}</td>
-                <td className="text-right pr-4">
-                  <a href={pdfUrl(`/api/receipts/${r.id}/pdf`)} target="_blank" rel="noreferrer"
-                     className="att-btn inline-flex items-center gap-1" data-testid={`rcp-pdf-${r.id}`}>
-                    <FileText size={12}/> Open
-                  </a>
-                </td>
               </tr>
             ))}
-            {!sorted.length && (<tr><td colSpan="6" className="text-center text-[var(--ck-muted)] py-8">No receipts match the current filters.</td></tr>)}
+            {!sorted.length && (<tr><td colSpan="5" className="text-center text-[var(--ck-muted)] py-8">No receipts match the current filters.</td></tr>)}
           </tbody>
         </table>
       </div>

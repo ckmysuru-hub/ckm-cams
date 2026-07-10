@@ -71,6 +71,7 @@ function App() {
             <Route path="/tournaments" element={<DirectorOnly><TournamentList /></DirectorOnly>} />
             <Route path="/tournaments/new" element={<DirectorOnly><TournamentSetup /></DirectorOnly>} />
             <Route path="/tournaments/:id" element={<DirectorOnly><TournamentDetail /></DirectorOnly>} />
+            <Route path="/notifications" element={<DirectorOnly><WhatsAppMessages /></DirectorOnly>} />
             <Route path="/whatsapp-messages" element={<DirectorOnly><WhatsAppMessages /></DirectorOnly>} />
             <Route path="/reports" element={<DirectorOnly><Reports /></DirectorOnly>} />
             <Route path="/settings" element={<Settings />} />

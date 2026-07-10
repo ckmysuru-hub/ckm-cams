@@ -388,6 +388,9 @@ async def startup():
     await db.checkins.create_index([("student_id", 1), ("check_in_date", 1)], unique=True)
     await db.whatsapp_messages.create_index("created_at")
     await db.whatsapp_messages.create_index("to")
+    await db.email_messages.create_index("created_at")
+    await db.email_messages.create_index("to")
+    await db.email_messages.create_index("template")
     await db.whatsapp_events.create_index("received_at")
     await db.whatsapp_inbound_messages.create_index("message_id", unique=True, sparse=True)
     await db.whatsapp_inbound_messages.create_index([("from", 1), ("received_at", -1)])
@@ -516,6 +519,29 @@ def _schedule_whatsapp_message_log(doc: dict) -> None:
         loop.create_task(_persist_whatsapp_message(doc))
     except RuntimeError:
         logger.debug(f"[WHATSAPP LOG] {doc}")
+
+
+async def _persist_email_message(doc: dict) -> None:
+    try:
+        await db.email_messages.insert_one(doc)
+    except Exception as e:
+        logger.warning(f"failed to persist email message: {e}")
+
+
+def _schedule_email_message_log(doc: dict) -> None:
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_persist_email_message(doc))
+    except RuntimeError:
+        logger.debug(f"[EMAIL LOG] {doc}")
+
+
+def _plain_text_from_html(html: str) -> str:
+    text = re.sub(r"<br\s*/?>", "\n", html or "", flags=re.I)
+    text = re.sub(r"</p\s*>", "\n", text, flags=re.I)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
 
 def _whatsapp_response_message_ids(result: dict) -> List[str]:
@@ -855,7 +881,23 @@ def send_template_email(to_email: str, template_key: str, context: dict,
                         raw_context: Optional[dict] = None) -> dict:
     context = {"academy_name": os.environ.get("ACADEMY_NAME", "Chess Klub Mysuru"), **context}
     subject, html = render_email_template(template_key, context, raw_context)
-    return send_email(to_email, subject, html, attachments=attachments)
+    result = send_email(to_email, subject, html, attachments=attachments)
+    content = "Password reset email sent." if template_key == "password_reset" else _plain_text_from_html(html)[:1000]
+    _schedule_email_message_log({
+        "channel": "email",
+        "direction": "sent",
+        "to": to_email,
+        "display_to": to_email,
+        "template": template_key,
+        "subject": subject,
+        "content": content,
+        "context_keys": sorted(context.keys()),
+        "attachments": len(attachments or []),
+        "result": result,
+        "created_at": iso(now_utc()),
+        "status": "sent" if result.get("sent") else result.get("mode", "failed"),
+    })
+    return result
 
 
 def _payment_button_html(url: Optional[str]) -> str:
@@ -2888,30 +2930,40 @@ async def _persist_parsed_whatsapp_events(body: dict, event_id: str, received_at
     return {"inbound": inbound_count, "statuses": status_count}
 
 
-@api.get("/whatsapp/messages")
-async def list_whatsapp_messages(start_date: Optional[str] = None, end_date: Optional[str] = None,
-                                 _: dict = Depends(require_role("director"))):
-    sent_docs = await db.whatsapp_messages.find({}).sort("created_at", -1).to_list(1000)
-    legacy_batch = await db.whatsapp_batch_messages.find({}).sort("created_at", -1).to_list(500)
-    legacy_invites = await db.whatsapp_group_invites.find({}).sort("created_at", -1).to_list(500)
-    for legacy in legacy_batch + legacy_invites:
-        result = legacy.get("result") or {}
-        sent_docs.append({
-            "_id": legacy.get("_id"),
-            "to": legacy.get("sent_to") or legacy.get("parent_whatsapp") or "",
-            "display_to": legacy.get("sent_to") or legacy.get("parent_whatsapp") or "",
-            "template": legacy.get("template", ""),
-            "params": legacy.get("params", []),
-            "result": result,
-            "message_ids": _whatsapp_response_message_ids(result),
-            "created_at": legacy.get("created_at", ""),
-            "status": "sent" if result.get("sent") else result.get("mode", "legacy"),
-            "source": "legacy_batch_whatsapp",
-        })
-    sent_docs.sort(key=lambda d: d.get("created_at") or "", reverse=True)
+async def _notification_activity(start_date: Optional[str] = None, end_date: Optional[str] = None,
+                                 channel: str = "all", template: Optional[str] = None,
+                                 q: Optional[str] = None) -> dict:
+    include_whatsapp = channel in ("all", "whatsapp")
+    include_email = channel in ("all", "email")
+    needle = (q or "").strip().lower()
+    template_filter = (template or "").strip()
+
+    sent_docs = []
+    if include_whatsapp:
+        sent_docs = await db.whatsapp_messages.find({}).sort("created_at", -1).to_list(1000)
+        legacy_batch = await db.whatsapp_batch_messages.find({}).sort("created_at", -1).to_list(500)
+        legacy_invites = await db.whatsapp_group_invites.find({}).sort("created_at", -1).to_list(500)
+        for legacy in legacy_batch + legacy_invites:
+            result = legacy.get("result") or {}
+            sent_docs.append({
+                "_id": legacy.get("_id"),
+                "to": legacy.get("sent_to") or legacy.get("parent_whatsapp") or "",
+                "display_to": legacy.get("sent_to") or legacy.get("parent_whatsapp") or "",
+                "template": legacy.get("template", ""),
+                "params": legacy.get("params", []),
+                "result": result,
+                "message_ids": _whatsapp_response_message_ids(result),
+                "created_at": legacy.get("created_at", ""),
+                "status": "sent" if result.get("sent") else result.get("mode", "legacy"),
+                "source": "legacy_batch_whatsapp",
+            })
+        sent_docs.sort(key=lambda d: d.get("created_at") or "", reverse=True)
+    email_docs = []
+    if include_email:
+        email_docs = await db.email_messages.find({}).sort("created_at", -1).to_list(1000)
     parsed_messages = await db.whatsapp_inbound_messages.find({}).sort("received_at", -1).to_list(2000)
     parsed_statuses = await db.whatsapp_statuses.find({}).sort("received_at", -1).to_list(3000)
-    if not parsed_messages and not parsed_statuses:
+    if include_whatsapp and not parsed_messages and not parsed_statuses:
         event_docs = await db.whatsapp_events.find({}).sort("received_at", -1).to_list(2000)
         for event in event_docs:
             extracted = _extract_whatsapp_events(event.get("payload") or {})
@@ -2923,38 +2975,102 @@ async def list_whatsapp_messages(start_date: Optional[str] = None, end_date: Opt
                 parsed_statuses.append(status)
 
     items = []
-    for doc in sent_docs:
-        created_at = doc.get("created_at") or ""
-        if not _in_date_window(created_at, start_date, end_date):
-            continue
-        to_phone = doc.get("to") or ""
-        message_ids = set(doc.get("message_ids") or [])
-        statuses = [
-            s for s in parsed_statuses
-            if (s.get("message_id") in message_ids) or (to_phone and s.get("recipient_id") == to_phone)
-        ][:10]
-        responses = [
-            m for m in parsed_messages
-            if to_phone and m.get("from") == to_phone and (not m.get("received_at") or m.get("received_at") >= created_at)
-        ][:10]
-        item = serialize_doc(doc)
-        item["statuses"] = [serialize_doc(s) for s in statuses]
-        item["responses"] = [serialize_doc(m) for m in responses]
-        item["latest_status"] = statuses[0].get("status") if statuses else item.get("latest_status") or item.get("status")
-        item["response_count"] = len(responses)
-        items.append(item)
+    if include_whatsapp:
+        for doc in sent_docs:
+            created_at = doc.get("created_at") or ""
+            if not _in_date_window(created_at, start_date, end_date):
+                continue
+            if template_filter and doc.get("template") != template_filter:
+                continue
+            to_phone = doc.get("to") or ""
+            message_ids = set(doc.get("message_ids") or [])
+            statuses = [
+                s for s in parsed_statuses
+                if (s.get("message_id") in message_ids) or (to_phone and s.get("recipient_id") == to_phone)
+            ][:10]
+            responses = [
+                m for m in parsed_messages
+                if to_phone and m.get("from") == to_phone and (not m.get("received_at") or m.get("received_at") >= created_at)
+            ][:10]
+            item = serialize_doc(doc)
+            item["channel"] = "whatsapp"
+            item["direction"] = "sent"
+            item["statuses"] = [serialize_doc(s) for s in statuses]
+            item["responses"] = [serialize_doc(m) for m in responses]
+            item["latest_status"] = statuses[0].get("status") if statuses else item.get("latest_status") or item.get("status")
+            item["response_count"] = len(responses)
+            items.append(item)
+
+    if include_email:
+        for doc in email_docs:
+            created_at = doc.get("created_at") or ""
+            if not _in_date_window(created_at, start_date, end_date):
+                continue
+            if template_filter and doc.get("template") != template_filter:
+                continue
+            item = serialize_doc(doc)
+            item["channel"] = "email"
+            item["direction"] = "sent"
+            item["latest_status"] = item.get("status")
+            item["responses"] = []
+            item["response_count"] = 0
+            items.append(item)
+
+    if needle:
+        def matches(item: dict) -> bool:
+            hay = " ".join([
+                str(item.get("display_to") or item.get("to") or ""),
+                str(item.get("template") or ""),
+                str(item.get("subject") or ""),
+                str(item.get("status") or item.get("latest_status") or ""),
+                str(item.get("content") or ""),
+                " ".join([str(p) for p in item.get("params") or []]),
+            ]).lower()
+            return needle in hay
+        items = [item for item in items if matches(item)]
+
+    items.sort(key=lambda d: d.get("created_at") or "", reverse=True)
 
     inbound_only = [
-        serialize_doc(m) for m in parsed_messages
+        {**serialize_doc(m), "channel": "whatsapp", "direction": "received", "template": ""}
+        for m in (parsed_messages if include_whatsapp else [])
         if _in_date_window(m.get("received_at"), start_date, end_date)
+        and (not needle or needle in " ".join([
+            str(m.get("from") or ""),
+            str(m.get("profile_name") or ""),
+            str(m.get("text") or ""),
+            str(m.get("type") or ""),
+        ]).lower())
     ][:200]
+    templates = sorted({
+        item.get("template") for item in items
+        if item.get("template")
+    })
     dashboard = {
-        "sent": len(items),
+        "sent": len([m for m in items if m.get("direction") == "sent"]),
+        "whatsapp_sent": len([m for m in items if m.get("channel") == "whatsapp"]),
+        "email_sent": len([m for m in items if m.get("channel") == "email"]),
         "inbound": len(inbound_only),
         "with_responses": len([m for m in items if m.get("response_count", 0) > 0]),
         "failed": len([m for m in items if m.get("latest_status") == "failed" or m.get("status") == "failed"]),
     }
-    return {"messages": items, "inbound": inbound_only, "dashboard": dashboard}
+    return {"messages": items, "inbound": inbound_only, "dashboard": dashboard, "templates": templates}
+
+
+@api.get("/notifications/messages")
+async def list_notification_messages(start_date: Optional[str] = None, end_date: Optional[str] = None,
+                                     channel: Literal["all", "whatsapp", "email"] = "all",
+                                     template: Optional[str] = None,
+                                     q: Optional[str] = None,
+                                     _: dict = Depends(require_role("director"))):
+    return await _notification_activity(start_date, end_date, channel, template, q)
+
+
+@api.get("/whatsapp/messages")
+async def list_whatsapp_messages(start_date: Optional[str] = None, end_date: Optional[str] = None,
+                                 template: Optional[str] = None, q: Optional[str] = None,
+                                 _: dict = Depends(require_role("director"))):
+    return await _notification_activity(start_date, end_date, "whatsapp", template, q)
 
 # ---------------------------- WhatsApp Webhook ----------------------------
 @api.get("/whatsapp/webhook")

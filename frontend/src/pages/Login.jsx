@@ -10,8 +10,8 @@ import { Loader2, ArrowLeft, MailCheck } from "lucide-react";
 export default function Login() {
   const { user, ready, login } = useAuth();
   const nav = useNavigate();
-  const [email, setEmail] = useState("admin@chessklub.in");
-  const [password, setPassword] = useState("Admin@123");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(false);
   const [mode, setMode] = useState("login"); // "login" | "forgot" | "forgot-sent"
