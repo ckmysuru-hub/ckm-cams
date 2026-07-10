@@ -18,7 +18,7 @@ export default function Login() {
   const [forgotEmail, setForgotEmail] = useState("");
   const [forgotLoading, setForgotLoading] = useState(false);
 
-  if (ready && user) return <Navigate to="/" replace />;
+  if (ready && user) return <Navigate to="/dashboard" replace />;
 
   const submit = async (e) => {
     e.preventDefault();
@@ -26,7 +26,7 @@ export default function Login() {
     setLoading(true);
     try {
       await login(email, password);
-      nav("/", { replace: true });
+      nav("/dashboard", { replace: true });
     } catch (ex) {
       setErr(formatApiError(ex.response?.data?.detail) || ex.message);
     } finally {

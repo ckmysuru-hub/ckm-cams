@@ -2,6 +2,7 @@ import { Navigate, Route, BrowserRouter, Routes } from "react-router-dom";
 import "@/App.css";
 import { AuthProvider, useAuth } from "@/contexts/AuthContext";
 import Layout from "@/components/Layout";
+import Home from "@/pages/Home";
 import Login from "@/pages/Login";
 import ResetPassword from "@/pages/ResetPassword";
 import Dashboard from "@/pages/Dashboard";
@@ -39,7 +40,7 @@ function Protected({ children }) {
 
 function DirectorOnly({ children }) {
   const { user } = useAuth();
-  if (!isDirector(user)) return <Navigate to="/" replace />;
+  if (!isDirector(user)) return <Navigate to="/dashboard" replace />;
   return children;
 }
 
@@ -48,6 +49,7 @@ function App() {
     <BrowserRouter>
       <AuthProvider>
         <Routes>
+          <Route path="/" element={<Home />} />
           <Route path="/login" element={<Login />} />
           <Route path="/reset-password" element={<ResetPassword />} />
           <Route path="/kiosk" element={<Kiosk />} />
@@ -57,7 +59,7 @@ function App() {
           <Route path="/public/tournaments/:id" element={<PublicTournament />} />
           <Route path="/tournaments/:id/register" element={<PublicTournamentRegister />} />
           <Route element={<Protected><Layout /></Protected>}>
-            <Route path="/" element={<Dashboard />} />
+            <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/students" element={<Students />} />
             <Route path="/students/:id" element={<StudentDetail />} />
             <Route path="/batches" element={<Batches />} />

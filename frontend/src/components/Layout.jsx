@@ -11,7 +11,7 @@ import {
 import { Toaster } from "@/components/ui/sonner";
 
 const NAV = [
-  { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true, testid: "nav-dashboard" },
+  { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard, testid: "nav-dashboard" },
   { to: "/students", label: "Students", icon: Users, testid: "nav-students" },
   { to: "/registrations", label: "Registrations", icon: Inbox, testid: "nav-registrations" },
   { to: "/batches", label: "Batches", icon: Calendar, testid: "nav-batches" },

@@ -6,7 +6,7 @@ import { usePagination } from "@/lib/usePagination";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { RefreshCw, Search, MessageCircle, CheckCircle2, AlertTriangle, Inbox, Send, Mail, Bell, Filter } from "lucide-react";
+import { RefreshCw, Search, MessageCircle, CheckCircle2, AlertTriangle, Send, Mail, Bell, Filter, Eye } from "lucide-react";
 import { toast } from "sonner";
 
 const today = () => new Date().toISOString().slice(0, 10);
@@ -19,6 +19,16 @@ function statusTone(status) {
 }
 
 const stamp = (value) => value?.slice(0, 16).replace("T", " ") || "--";
+const notificationContent = (item) => item?.content || (item?.params || []).map((p, i) => `${i + 1}. ${p}`).join("\n") || "";
+const errorDetails = (item) => {
+  if (item?.error_details) return item.error_details;
+  const result = item?.result || {};
+  if (result.error) return String(result.error);
+  const apiError = result.response?.error;
+  if (apiError) return typeof apiError === "string" ? apiError : JSON.stringify(apiError, null, 2);
+  if (result.response?.errors) return JSON.stringify(result.response.errors, null, 2);
+  return "";
+};
 
 export default function WhatsAppMessages() {
   const [range, setRange] = useState({ start_date: monthStart(), end_date: today() });
@@ -65,11 +75,6 @@ export default function WhatsAppMessages() {
     ].join(" ").toLowerCase();
     return hay.includes(needle);
   });
-  const filteredInbound = (data.inbound || []).filter((msg) => {
-    if (!q) return true;
-    const needle = q.toLowerCase();
-    return `${msg.profile_name || ""} ${msg.from || ""} ${msg.text || msg.type || ""}`.toLowerCase().includes(needle);
-  });
   const { page, setPage, pageSize, setPageSize, pageItems, totalPages, totalItems } = usePagination(filtered, 20);
 
   return (
@@ -77,7 +82,7 @@ export default function WhatsAppMessages() {
       <PageHeader
         eyebrow="Director"
         title="Notifications"
-        subtitle="Email and WhatsApp notifications, delivery status, and parent replies from the webhook."
+        subtitle="Email and WhatsApp notifications with full sent content and delivery/error details."
       />
 
       <div className="ck-card-elevated p-4 mb-4 grid lg:grid-cols-6 gap-3 items-end" data-testid="notifications-toolbar">
@@ -122,132 +127,138 @@ export default function WhatsAppMessages() {
         <Stat label="Sent" value={data.dashboard?.sent ?? 0} icon={Send} />
         <Stat label="WhatsApp sent" value={data.dashboard?.whatsapp_sent ?? 0} icon={MessageCircle} />
         <Stat label="Email sent" value={data.dashboard?.email_sent ?? 0} icon={Mail} />
-        <Stat label="Replies received" value={data.dashboard?.inbound ?? 0} icon={Inbox} />
+        <Stat label="Failed" value={data.dashboard?.failed ?? 0} icon={AlertTriangle} />
       </div>
 
-      <div className="grid xl:grid-cols-[1fr_380px] gap-4">
-        <div>
-          <div className="ck-card-elevated p-2 overflow-x-auto">
-            <div className="px-2 py-3">
-              <div className="text-xs uppercase tracking-wider font-semibold text-[var(--ck-muted)]">Notification log</div>
-              <div className="ck-display text-xl font-semibold">Sent email and WhatsApp messages</div>
-            </div>
-            <table className="w-full ck-table text-sm" data-testid="notifications-table">
-              <thead>
-                <tr className="text-left">
-                  <th className="px-4 py-3">Sent at</th>
-                  <th>Channel</th>
-                  <th>Recipient</th>
-                  <th>Template</th>
-                  <th>Status</th>
-                  <th>Content / replies</th>
+      <div>
+        <div className="ck-card-elevated p-2 overflow-x-auto">
+          <div className="px-2 py-3">
+            <div className="text-xs uppercase tracking-wider font-semibold text-[var(--ck-muted)]">Notification log</div>
+            <div className="ck-display text-xl font-semibold">Sent email and WhatsApp messages</div>
+          </div>
+          <table className="w-full ck-table text-sm" data-testid="notifications-table">
+            <thead>
+              <tr className="text-left">
+                <th className="px-4 py-3">Sent at</th>
+                <th>Channel</th>
+                <th>Recipient</th>
+                <th>Template</th>
+                <th>Status</th>
+                <th>Content</th>
+                <th className="text-right pr-4">Details</th>
+              </tr>
+            </thead>
+            <tbody>
+              {pageItems.map((m)=>(
+                <tr key={m.id || `${m.channel}-${m.created_at}-${m.to}`}>
+                  <td className="px-4 py-3 text-[var(--ck-muted)] whitespace-nowrap">{stamp(m.created_at)}</td>
+                  <td>
+                    <span className="inline-flex items-center gap-1.5 text-xs font-semibold capitalize">
+                      {m.channel === "email" ? <Mail size={13}/> : <MessageCircle size={13}/>}
+                      {m.channel}
+                    </span>
+                  </td>
+                  <td className="font-mono text-xs">{m.display_to || m.to}</td>
+                  <td className="font-medium">{m.template || "--"}</td>
+                  <td>
+                    <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-md border text-xs capitalize ${statusTone(m.latest_status)}`}>
+                      {["failed", "error"].includes(m.latest_status) ? <AlertTriangle size={12}/> : <CheckCircle2 size={12}/>}
+                      {m.latest_status || "unknown"}
+                    </span>
+                  </td>
+                  <td className="max-w-[440px]">
+                    <div className="text-xs">
+                      <div className="font-semibold truncate">{m.subject || m.template || "Notification"}</div>
+                      <div className="text-[var(--ck-muted)] truncate">{notificationContent(m) || "No content captured"}</div>
+                      {errorDetails(m) && <div className="text-red-600 truncate mt-1">{errorDetails(m)}</div>}
+                    </div>
+                  </td>
+                  <td className="text-right pr-4">
+                    <button
+                      type="button"
+                      onClick={()=>setSelected(m)}
+                      className="att-btn inline-flex items-center gap-1"
+                      data-testid={`notification-detail-${m.id || m.created_at}`}
+                    >
+                      <Eye size={12}/> View
+                    </button>
+                  </td>
                 </tr>
-              </thead>
-              <tbody>
-                {pageItems.map((m)=>(
-                  <tr key={m.id || `${m.channel}-${m.created_at}-${m.to}`}>
-                    <td className="px-4 py-3 text-[var(--ck-muted)] whitespace-nowrap">{stamp(m.created_at)}</td>
-                    <td>
-                      <span className="inline-flex items-center gap-1.5 text-xs font-semibold capitalize">
-                        {m.channel === "email" ? <Mail size={13}/> : <MessageCircle size={13}/>}
-                        {m.channel}
-                      </span>
-                    </td>
-                    <td className="font-mono text-xs">{m.display_to || m.to}</td>
-                    <td className="font-medium">{m.template || "--"}</td>
-                    <td>
-                      <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-md border text-xs capitalize ${statusTone(m.latest_status)}`}>
-                        {["failed", "error"].includes(m.latest_status) ? <AlertTriangle size={12}/> : <CheckCircle2 size={12}/>}
-                        {m.latest_status || "unknown"}
-                      </span>
-                    </td>
-                    <td className="max-w-[360px]">
-                      {m.channel === "whatsapp" ? (
-                        m.responses?.length ? (
-                          <button type="button" onClick={()=>setSelected(m)} className="text-left text-xs text-[var(--ck-orange)] font-semibold hover:underline">
-                            View {m.responses.length} full WhatsApp response{m.responses.length === 1 ? "" : "s"}
-                          </button>
-                        ) : (
-                          <span className="text-xs text-[var(--ck-muted)]">{(m.params || []).join(" · ") || "No reply"}</span>
-                        )
-                      ) : (
-                        <div className="text-xs">
-                          <div className="font-semibold truncate">{m.subject || "Email"}</div>
-                          <div className="text-[var(--ck-muted)] truncate">{m.content || "No body captured"}</div>
-                        </div>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-                {!filtered.length && (
-                  <tr><td colSpan="6" className="text-center text-[var(--ck-muted)] py-8">No notifications match the current filters.</td></tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-          <Pagination page={page} totalPages={totalPages} totalItems={totalItems}
-                      pageSize={pageSize} setPage={setPage} setPageSize={setPageSize} testId="notifications-pagination" />
+              ))}
+              {!filtered.length && (
+                <tr><td colSpan="7" className="text-center text-[var(--ck-muted)] py-8">No notifications match the current filters.</td></tr>
+              )}
+            </tbody>
+          </table>
         </div>
-
-        <div className="ck-card-elevated p-4" data-testid="whatsapp-inbound">
-          <div className="flex items-center justify-between gap-3 mb-3">
-            <div>
-              <div className="text-xs uppercase tracking-wider font-semibold text-[var(--ck-muted)]">Webhook inbox</div>
-              <div className="ck-display text-xl font-semibold">WhatsApp replies</div>
-            </div>
-            <Inbox size={18} className="text-[var(--ck-orange)]" />
-          </div>
-          <div className="space-y-3 max-h-[620px] overflow-auto pr-1">
-            {filteredInbound.map((msg)=>(
-              <div key={msg.id || msg.message_id || `${msg.from}-${msg.received_at}`} className="border border-[var(--ck-line)] rounded-md p-3 bg-white">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="font-semibold text-sm truncate">{msg.profile_name || msg.from || "Unknown"}</div>
-                    <div className="font-mono text-[11px] text-[var(--ck-muted)]">{msg.from}</div>
-                  </div>
-                  <div className="text-[11px] text-[var(--ck-muted)] whitespace-nowrap">{stamp(msg.received_at)}</div>
-                </div>
-                <div className="text-sm mt-2 whitespace-pre-wrap break-words">{msg.text || msg.type || "Message received"}</div>
-              </div>
-            ))}
-            {!filteredInbound.length && (
-              <div className="text-sm text-[var(--ck-muted)] py-8 text-center">No incoming replies in this date range.</div>
-            )}
-          </div>
-        </div>
+        <Pagination page={page} totalPages={totalPages} totalItems={totalItems}
+                    pageSize={pageSize} setPage={setPage} setPageSize={setPageSize} testId="notifications-pagination" />
       </div>
 
       <Dialog open={!!selected} onOpenChange={(open)=>{ if (!open) setSelected(null); }}>
-        <DialogContent className="max-w-2xl">
+        <DialogContent className="max-w-4xl">
           <DialogHeader>
-            <DialogTitle>WhatsApp responses</DialogTitle>
+            <DialogTitle>Notification details</DialogTitle>
           </DialogHeader>
           {selected && (
             <div className="space-y-4">
-              <div className="rounded-md border border-[var(--ck-line)] bg-white p-3 text-sm">
-                <div className="text-xs uppercase tracking-wider font-semibold text-[var(--ck-muted)] mb-1">Original template</div>
-                <div className="font-semibold">{selected.template}</div>
-                <div className="text-xs text-[var(--ck-muted)] mt-1">{(selected.params || []).join(" · ")}</div>
+              <div className="grid md:grid-cols-2 gap-3 text-sm">
+                <Info label="Channel" value={selected.channel} />
+                <Info label="Recipient" value={selected.display_to || selected.to} mono />
+                <Info label="Template" value={selected.template || "--"} />
+                <Info label="Status" value={selected.latest_status || selected.status || "unknown"} />
+                <Info label="Sent at" value={stamp(selected.created_at)} />
+                {selected.subject && <Info label="Subject" value={selected.subject} />}
               </div>
-              <div className="space-y-3 max-h-[55vh] overflow-auto pr-1">
-                {(selected.responses || []).map((r)=>(
-                  <div key={r.id || r.message_id || r.received_at} className="rounded-md border border-[var(--ck-line)] p-3">
-                    <div className="flex items-start justify-between gap-3 mb-2">
-                      <div>
-                        <div className="font-semibold text-sm">{r.profile_name || r.from || "Unknown"}</div>
-                        <div className="font-mono text-[11px] text-[var(--ck-muted)]">{r.from}</div>
-                      </div>
-                      <div className="text-[11px] text-[var(--ck-muted)] whitespace-nowrap">{stamp(r.received_at)}</div>
-                    </div>
-                    <div className="text-sm whitespace-pre-wrap break-words">{r.text || r.type || "Message received"}</div>
-                  </div>
-                ))}
+
+              <div className="rounded-md border border-[var(--ck-line)] bg-white p-3">
+                <div className="text-xs uppercase tracking-wider font-semibold text-[var(--ck-muted)] mb-2">Full content sent</div>
+                {selected.channel === "email" && selected.content_html ? (
+                  <iframe title="Email content" srcDoc={selected.content_html} className="w-full h-[320px] border border-[var(--ck-line)] rounded-md bg-white" />
+                ) : (
+                  <pre className="text-sm whitespace-pre-wrap break-words font-sans">{notificationContent(selected) || "No content captured."}</pre>
+                )}
+              </div>
+
+              {selected.channel === "whatsapp" && (
+                <div className="rounded-md border border-[var(--ck-line)] bg-white p-3">
+                  <div className="text-xs uppercase tracking-wider font-semibold text-[var(--ck-muted)] mb-2">Template parameters sent to WhatsApp</div>
+                  <ol className="space-y-1 text-sm">
+                    {(selected.params || []).map((param, idx)=>(
+                      <li key={`${idx}-${param}`} className="grid grid-cols-[32px_1fr] gap-2">
+                        <span className="text-[var(--ck-muted)] tabular-nums">{idx + 1}.</span>
+                        <span className="break-words">{param || "—"}</span>
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+              )}
+
+              {errorDetails(selected) && (
+                <div className="rounded-md border border-red-200 bg-red-50 p-3">
+                  <div className="text-xs uppercase tracking-wider font-semibold text-red-700 mb-2">Error details</div>
+                  <pre className="text-sm whitespace-pre-wrap break-words text-red-800">{errorDetails(selected)}</pre>
+                </div>
+              )}
+
+              <div className="rounded-md border border-[var(--ck-line)] bg-white p-3">
+                <div className="text-xs uppercase tracking-wider font-semibold text-[var(--ck-muted)] mb-2">Provider result</div>
+                <pre className="text-xs whitespace-pre-wrap break-words max-h-[220px] overflow-auto">{JSON.stringify(selected.result || {}, null, 2)}</pre>
               </div>
             </div>
           )}
         </DialogContent>
       </Dialog>
     </>
+  );
+}
+
+function Info({ label, value, mono }) {
+  return (
+    <div className="rounded-md border border-[var(--ck-line)] bg-white p-3 min-w-0">
+      <div className="text-[11px] uppercase tracking-wider font-semibold text-[var(--ck-muted)] mb-1">{label}</div>
+      <div className={`text-sm break-words ${mono ? "font-mono text-xs" : "font-medium"}`}>{value || "—"}</div>
+    </div>
   );
 }
 

@@ -198,4 +198,12 @@ body {
   [data-testid$="-toolbar"] label {
     width: 100% !important;
   }
+
+  /* Style the iframe itself */
+.iframe-container iframe {
+    width: 100%;
+    height: 100%;
+    border: none;
+    display: block;
+}
 }
