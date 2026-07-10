@@ -55,7 +55,7 @@ jobs:
           # Ampere (arm64) shape - building both means the image runs either
           # way without you having to remember which one you're on. Drop
           # whichever you don't need to speed this job up.
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

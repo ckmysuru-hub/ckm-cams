@@ -20,6 +20,7 @@ services:
     # `docker compose ... build` still works too (e.g. for local testing),
     # using the `build:` block below and tagging the result as this image.
     image: ${DOCKER_IMAGE:-ghcr.io/ckmysuru-hub/ckm-cams}:${IMAGE_TAG:-latest}
+    pull_policy: always
     build:
       context: .
       args:
