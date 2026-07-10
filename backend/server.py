@@ -14,7 +14,6 @@ import secrets
 import re
 import hmac
 import hashlib
-from html import escape
 from datetime import datetime, timezone, timedelta, date
 from typing import List, Optional, Literal, Dict
 
@@ -545,32 +544,6 @@ def _plain_text_from_html(html: str) -> str:
     return text
 
 
-def _whatsapp_template_content(template_name: str, body_params: List[str]) -> str:
-    lines = [f"WhatsApp template: {template_name}", "Parameters sent:"]
-    for idx, param in enumerate(body_params or [], start=1):
-        lines.append(f"{idx}. {param}")
-    return "\n".join(lines)
-
-
-def _notification_error_details(result: Optional[dict]) -> str:
-    if not result:
-        return ""
-    if result.get("error"):
-        return str(result.get("error"))
-    response = result.get("response") or {}
-    if isinstance(response, dict):
-        err = response.get("error")
-        if isinstance(err, dict):
-            parts = [str(err.get(k)) for k in ("message", "type", "code", "error_subcode", "fbtrace_id") if err.get(k)]
-            return " | ".join(parts)
-        if err:
-            return str(err)
-        errors = response.get("errors")
-        if errors:
-            return str(errors)
-    return ""
-
-
 def _whatsapp_response_message_ids(result: dict) -> List[str]:
     messages = ((result or {}).get("response") or {}).get("messages") or []
     return [m.get("id") for m in messages if m.get("id")]
@@ -592,7 +565,6 @@ def send_whatsapp_template(to_phone: str, template_name: str, language_code: str
             "template": template_name,
             "language": language_code,
             "params": body_params or [],
-            "content": _whatsapp_template_content(template_name, body_params or []),
             "result": result,
             "message_ids": [],
             "created_at": iso(now_utc()),
@@ -630,9 +602,7 @@ def send_whatsapp_template(to_phone: str, template_name: str, language_code: str
             "template": template_name,
             "language": language_code,
             "params": body_params or [],
-            "content": _whatsapp_template_content(template_name, body_params or []),
             "result": result,
-            "error_details": _notification_error_details(result),
             "message_ids": _whatsapp_response_message_ids(result),
             "created_at": iso(now_utc()),
             "status": "sent" if ok else "failed",
@@ -647,9 +617,7 @@ def send_whatsapp_template(to_phone: str, template_name: str, language_code: str
             "template": template_name,
             "language": language_code,
             "params": body_params or [],
-            "content": _whatsapp_template_content(template_name, body_params or []),
             "result": result,
-            "error_details": _notification_error_details(result),
             "message_ids": [],
             "created_at": iso(now_utc()),
             "status": "failed",
@@ -858,6 +826,7 @@ def invoice_upi_url(invoice: dict) -> str:
 
 async def send_fee_reminder_whatsapp(to_phone: str, invoice: dict, payment_link_url: str = "") -> dict:
     template_name = os.environ.get("WHATSAPP_FEE_REMINDER_TEMPLATE", "fee_reminder")
+    invoice_pdf_url = await portal_pdf_url(str(invoice.get("student_id", "")), "invoice", _doc_id(invoice))
     return send_whatsapp_template(
         to_phone,
         template_name,
@@ -868,11 +837,13 @@ async def send_fee_reminder_whatsapp(to_phone: str, invoice: dict, payment_link_
             money_text(invoice.get("balance", 0)),
             invoice.get("due_date", ""),
             payment_link_url,
+            invoice_pdf_url,
         ],
     )
 
 async def send_invoice_created_whatsapp(to_phone: str, invoice: dict, payment_link_url: str = "") -> dict:
     template_name = os.environ.get("WHATSAPP_INVOICE_CREATED_TEMPLATE", "invoice_created")
+    invoice_pdf_url = await portal_pdf_url(str(invoice.get("student_id", "")), "invoice", _doc_id(invoice))
     return send_whatsapp_template(
         to_phone,
         template_name,
@@ -883,7 +854,8 @@ async def send_invoice_created_whatsapp(to_phone: str, invoice: dict, payment_li
             invoice.get("invoice_no", ""),
             money_text(invoice.get("balance", 0)),
             invoice.get("due_date", ""),
-            payment_link_url,
+            invoice_pdf_url,
+            payment_link_url
         ],
     )
 
@@ -910,8 +882,7 @@ def send_template_email(to_email: str, template_key: str, context: dict,
     context = {"academy_name": os.environ.get("ACADEMY_NAME", "Chess Klub Mysuru"), **context}
     subject, html = render_email_template(template_key, context, raw_context)
     result = send_email(to_email, subject, html, attachments=attachments)
-    redacted = template_key == "password_reset"
-    content = "Password reset email sent." if redacted else _plain_text_from_html(html)
+    content = "Password reset email sent." if template_key == "password_reset" else _plain_text_from_html(html)[:1000]
     _schedule_email_message_log({
         "channel": "email",
         "direction": "sent",
@@ -920,11 +891,9 @@ def send_template_email(to_email: str, template_key: str, context: dict,
         "template": template_key,
         "subject": subject,
         "content": content,
-        "content_html": "" if redacted else html,
         "context_keys": sorted(context.keys()),
         "attachments": len(attachments or []),
         "result": result,
-        "error_details": _notification_error_details(result),
         "created_at": iso(now_utc()),
         "status": "sent" if result.get("sent") else result.get("mode", "failed"),
     })
@@ -942,7 +911,7 @@ def _payment_button_html(url: Optional[str]) -> str:
         'style="display:inline-block;background:#ea580c;color:#ffffff;padding:10px 20px;'
         'border-radius:6px;text-decoration:none;font-weight:bold;">Pay Online Now</a></p>'
         f'<p style="margin:8px 0;color:#555;font-size:13px;">Payment link: '
-        f'<a href="{escape(url)}">{escape(url)}</a></p>'
+        f'<a href="{url}">{url}</a></p>'
     )
 
 
@@ -1404,7 +1373,7 @@ async def create_student(payload: StudentIn, user: dict = Depends(require_role("
     # send welcome
     if saved.get("parent_whatsapp"):
         send_named_whatsapp_template(saved["parent_whatsapp"], "student_welcome",
-                                     [saved["full_name"], saved["student_code"], os.environ.get("ACADEMY_NAME", "")])
+                                     [saved["parent_name"], saved["full_name"], saved["student_code"]])
         if saved.get("batch_id"):
             await send_batch_group_invite(saved, created_by=user["id"], reason="student_created")
     if saved.get("parent_email"):
@@ -1793,7 +1762,6 @@ async def _send_invoice_created_notifications(inv: dict) -> None:
             "balance": money_text(inv.get("balance", 0)),
             "due_date": inv.get("due_date", ""),
             "invoice_pdf_url": invoice_pdf_url,
-            "payment_link_url": link_url,
         }, raw_context={"payment_button": _payment_button_html(link_url)})
         
 
@@ -1948,7 +1916,6 @@ async def remind_invoice(iid: str, user: dict = Depends(require_role("finance", 
             "balance": money_text(inv.get("balance", 0)),
             "due_date": inv.get("due_date", ""),
             "invoice_pdf_url": invoice_pdf_url,
-            "payment_link_url": link_url,
         }, raw_context={"payment_button": _payment_button_html(link_url)})
     reminder_entry = {
         "sent_at": iso(now_utc()),
@@ -3030,8 +2997,6 @@ async def _notification_activity(start_date: Optional[str] = None, end_date: Opt
             item = serialize_doc(doc)
             item["channel"] = "whatsapp"
             item["direction"] = "sent"
-            item["content"] = item.get("content") or _whatsapp_template_content(item.get("template", ""), item.get("params") or [])
-            item["error_details"] = item.get("error_details") or _notification_error_details(item.get("result") or {})
             item["statuses"] = [serialize_doc(s) for s in statuses]
             item["responses"] = [serialize_doc(m) for m in responses]
             item["latest_status"] = statuses[0].get("status") if statuses else item.get("latest_status") or item.get("status")
@@ -3048,7 +3013,6 @@ async def _notification_activity(start_date: Optional[str] = None, end_date: Opt
             item = serialize_doc(doc)
             item["channel"] = "email"
             item["direction"] = "sent"
-            item["error_details"] = item.get("error_details") or _notification_error_details(item.get("result") or {})
             item["latest_status"] = item.get("status")
             item["responses"] = []
             item["response_count"] = 0
