@@ -15,10 +15,16 @@ services:
       start_period: 20s
 
   app:
+    # On the VM: `docker compose -f docker-compose.prod.yml pull && ... up -d`
+    # pulls this pre-built image from GHCR - no build ever runs on the VM.
+    # `docker compose ... build` still works too (e.g. for local testing),
+    # using the `build:` block below and tagging the result as this image.
+    image: ${DOCKER_IMAGE:-ghcr.io/ckmysuru-hub/ckm-cams}:${IMAGE_TAG:-latest}
     build:
       context: .
       args:
         REACT_APP_BACKEND_URL: ""
+        LOW_MEMORY_BUILD: "${LOW_MEMORY_BUILD:-false}"
     restart: unless-stopped
     depends_on:
       mongo:
@@ -48,9 +54,6 @@ services:
       WHATSAPP_GRAPH_VERSION: ${WHATSAPP_GRAPH_VERSION:-v21.0}
       APP_LOG_LEVEL: ${APP_LOG_LEVEL:-INFO}
       ROOT_LOG_LEVEL: ${ROOT_LOG_LEVEL:-WARNING}
-      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-}
-      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:-}
-      RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET:-}
     expose:
       - "8001"
     healthcheck:
