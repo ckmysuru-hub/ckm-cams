@@ -161,7 +161,6 @@ EMAIL_TEMPLATES = {
             <p>This is a reminder for invoice <b>{invoice_no}</b> for <b>{student_name}</b>.</p>
             <p>Balance due: <b>{balance}</b>. Due date: <b>{due_date}</b>.</p>
             <p><a href="{invoice_pdf_url}">View invoice PDF</a></p>
-            <p><a href="{payment_link_url}">Pay online with Razorpay</a></p>
             {payment_button}
                 <p>
         Warm Regards,<br>
@@ -177,7 +176,6 @@ EMAIL_TEMPLATES = {
             <p>This is to inform you that invoice <b>{invoice_no}</b> for <b>{student_name}'s</b> chess classes has been created.</p>
             <p>Balance due: <b>{balance}</b>. Due date: <b>{due_date}</b>.</p>
             <p><a href="{invoice_pdf_url}">View invoice PDF</a></p>
-            <p><a href="{payment_link_url}">Pay online with Razorpay</a></p>
             {payment_button}
                 <p>
         Warm Regards,<br>
