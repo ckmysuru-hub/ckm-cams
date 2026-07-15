@@ -149,6 +149,11 @@ export default function StudentDetail() {
   // Calculate total billed: only include invoices that are paid or pending (excluding cancelled)
   const billedInvoices = inv.filter(i => i.status !== 'cancelled');
   const totalBilled = billedInvoices.reduce((a,b)=>a+b.amount,0);
+  const attendanceCounts = att?.counts || {};
+  const totalAttended = attendanceCounts.total_attended ?? ((attendanceCounts.theory_present || 0) + (attendanceCounts.practice_present || 0));
+  const theoryPresent = attendanceCounts.theory_present || 0;
+  const practicePresent = attendanceCounts.practice_present || 0;
+  const theoryAbsent = attendanceCounts.theory_absent || attendanceCounts.A || 0;
 
   return (
     <>
@@ -178,28 +183,38 @@ export default function StudentDetail() {
       />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
-        <Stat label="Attendance" value={att ? `${att.percentage}%` : "—"} hint={`P ${att?.counts.P||0} · A ${att?.counts.A||0} `} />
+        <Stat label="Classes Attended" value={att ? totalAttended : "—"} hint={`Theory ${theoryPresent} · Practice ${practicePresent} · Absent ${theoryAbsent}`} />
         <Stat label="Total Billed" value={fmtINR(totalBilled)} hint={`${billedInvoices.length} invoices`} />
         <Stat label="Pending" value={fmtINR(inv.reduce((a,b)=>a+b.balance,0))} hint="balance outstanding" accent />
       </div>
 
       <div className="ck-card-elevated p-5 mb-6" data-testid="attendance-history-card">
-        <div className="text-xs uppercase tracking-wider font-semibold text-[var(--ck-muted)] mb-3">Attendance details</div>
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-3">
+          <div className="text-xs uppercase tracking-wider font-semibold text-[var(--ck-muted)]">Attendance details</div>
+          {att && (
+            <div className="text-xs text-[var(--ck-muted)]">
+              Total classes: {attendanceCounts.total_classes || 0} · Attendance: {att.percentage}%
+            </div>
+          )}
+        </div>
         {att?.history?.length ? (
           <div className="divide-y divide-[var(--ck-line)]">
             {att.history.slice(0, 12).map((row)=>(
-              <div key={`${row.date}-${row.status}`} className="py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+              <div key={`${row.date}-${row.session_type}-${row.check_in || row.status}`} className="py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
                 <div>
-                  <div className="font-medium text-sm">{row.date}</div>
+                  <div className="font-medium text-sm flex items-center gap-2">
+                    <span>{row.date}</span>
+                    <span className="ck-pill ck-pill-black capitalize">{row.session_type || "theory"}</span>
+                  </div>
                   <div className="text-xs text-[var(--ck-muted)]">
                     {row.topic || "Topic not recorded"}{row.coach_name ? ` · ${row.coach_name}` : ""}
+                    {row.check_in ? ` · Check-in ${new Date(row.check_in).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}` : ""}
                   </div>
                 </div>
                 <span className={`ck-pill ${
                   row.status === "P" ? "ck-pill-green" :
-                  row.status === "A" ? "ck-pill-red" :
-                  row.status === "LT" ? "ck-pill-orange" : "ck-pill-black"
-                }`}>{row.status}</span>
+                  row.status === "A" ? "ck-pill-red" : "ck-pill-black"
+                }`}>{row.label || (row.status === "P" ? "Present" : "Absent")}</span>
               </div>
             ))}
           </div>

@@ -115,7 +115,7 @@ export default function Attendance() {
       <PageHeader
         eyebrow="Daily roll-call"
         title="Attendance"
-        subtitle="Tap to mark. Auto-saves the session. Late counts toward attendance percentage."
+        subtitle="Mark theory class attendance for the selected batch."
       />
 
       <div className="ck-card-elevated p-4 mb-4 grid md:grid-cols-4 gap-3 items-end">
@@ -178,7 +178,7 @@ export default function Attendance() {
                         onClick={()=>setMark(s.id, o.v)}
                         className={`att-btn ${marks[s.id]===o.v?`active ${o.v}`:""}`}
                         data-testid={`mark-${s.id}-${o.v}`}>
-                        {o.v}
+                        {o.label}
                       </button>
                     ))}
                   </div>

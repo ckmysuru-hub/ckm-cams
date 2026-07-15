@@ -69,7 +69,11 @@ export default function ParentPortal() {
 
         {/* Stat cards */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-          <StatCard label="Attendance" value={`${attendance.percentage}%`} hint={`${attendance.counts.P + attendance.counts.LT} of ${attendance.counts.P + attendance.counts.A + attendance.counts.L + attendance.counts.LT} sessions`} />
+          <StatCard
+            label="Classes Attended"
+            value={attendance.counts.total_attended || 0}
+            hint={`Theory ${attendance.counts.theory_present || 0} · Practice ${attendance.counts.practice_present || 0}`}
+          />
           <StatCard label="Total Billed" value={fmtINR(totalBilled)} hint={`${billedInvoices.length} invoices`} accent />
           <StatCard label="Receipts" value={receipts.length} hint="payments received" />
           <StatCard
@@ -89,7 +93,7 @@ export default function ParentPortal() {
                 h.status === "A" ? "bg-red-50 text-red-700" :
                 "bg-slate-50 text-slate-600"
               }`}>
-                {h.date.slice(5)} · {h.status}
+                {h.date.slice(5)} · {h.label || (h.status === "P" ? "Present" : "Absent")} · {h.session_type || "theory"}
               </div>
             ))}
           </div>

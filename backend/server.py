@@ -920,7 +920,11 @@ def _payment_button_html(url: Optional[str]) -> str:
 
 
 async def existing_attendance_for_student(student_id: str, session_date: str, batch_id: Optional[str] = None) -> Optional[dict]:
-    query = {f"marks.{student_id}": {"$exists": True}, "session_date": session_date}
+    query = {
+        f"marks.{student_id}": {"$exists": True},
+        "session_date": session_date,
+        "marked_via": {"$ne": "kiosk"},
+    }
     if batch_id:
         query["batch_id"] = {"$ne": batch_id}
     return await db.attendance.find_one(query)
@@ -1558,7 +1562,7 @@ async def save_attendance(payload: AttendanceSessionIn, user: dict = Depends(req
         coach_name = coach.get("name", "")
     duplicate_students = []
     for sid, mark in payload.marks.items():
-        if mark not in ("P", "A", "L", "LT", "H"):
+        if mark not in ("P", "A"):
             raise HTTPException(400, f"Invalid attendance mark for student {sid}")
         duplicate = await existing_attendance_for_student(sid, payload.session_date, batch_id=payload.batch_id)
         if duplicate:
@@ -1632,23 +1636,65 @@ async def student_attendance(sid: str, user: dict = Depends(get_current_user)):
     if not student:
         raise HTTPException(404, "Student not found")
     batch_id = student.get("batch_id")
-    sessions = await db.attendance.find({"batch_id": batch_id}).sort("session_date", -1).limit(100).to_list(100)
+    sessions = await db.attendance.find({
+        "batch_id": batch_id,
+        "marked_via": {"$ne": "kiosk"},
+    }).sort("session_date", -1).to_list(5000) if batch_id else []
+    practice_sessions = await db.checkins.find({"student_id": sid}).sort("check_in_date", -1).to_list(5000)
     history = []
-    counts = {"P": 0, "A": 0}
-    for s in sessions:
-        st = s.get("marks", {}).get(sid)
-        if st:
-            counts[st] = counts.get(st, 0) + 1
-            history.append({
-                "date": s["session_date"],
-                "status": st,
-                "topic": s.get("topic", ""),
-                "coach_id": s.get("coach_id"),
-                "coach_name": s.get("coach_name", ""),
-            })
-    total_sessions = sum(counts[k] for k in ["P", "A"])
-    pct = round((counts["P"] + counts["LT"]) / total_sessions * 100, 1) if total_sessions else 0
-    return {"counts": counts, "history": history, "percentage": pct}
+    counts = {
+        "P": 0,
+        "A": 0,
+        "present": 0,
+        "absent": 0,
+        "theory_present": 0,
+        "theory_absent": 0,
+        "practice_present": len(practice_sessions),
+    }
+    for session in sessions:
+        mark = (session.get("marks") or {}).get(sid)
+        if not mark or mark == "H":
+            continue
+        normalized = "P" if mark in ("P", "LT") else "A"
+        counts[normalized] += 1
+        if normalized == "P":
+            counts["present"] += 1
+            counts["theory_present"] += 1
+        else:
+            counts["absent"] += 1
+            counts["theory_absent"] += 1
+        history.append({
+            "date": session["session_date"],
+            "status": normalized,
+            "label": "Present" if normalized == "P" else "Absent",
+            "session_type": "theory",
+            "topic": session.get("topic", ""),
+            "coach_id": session.get("coach_id"),
+            "coach_name": session.get("coach_name", ""),
+        })
+    for checkin in practice_sessions:
+        counts["present"] += 1
+        counts["P"] += 1
+        history.append({
+            "date": checkin.get("check_in_date", ""),
+            "status": "P",
+            "label": "Present",
+            "session_type": "practice",
+            "topic": "Practice session",
+            "coach_id": None,
+            "coach_name": "",
+            "check_in": checkin.get("check_in"),
+            "check_out": checkin.get("check_out"),
+        })
+    theory_total = counts["theory_present"] + counts["theory_absent"]
+    total_classes = theory_total + counts["practice_present"]
+    total_attended = counts["theory_present"] + counts["practice_present"]
+    counts["theory_total"] = theory_total
+    counts["total_classes"] = total_classes
+    counts["total_attended"] = total_attended
+    history.sort(key=lambda row: row.get("date") or "", reverse=True)
+    pct = round(total_attended / total_classes * 100, 1) if total_classes else 0
+    return {"counts": counts, "history": history[:100], "percentage": pct}
 
 # ---------------------------- Invoices & Payments ----------------------------
 async def _carry_forward_pending_items(student_id: str, period: Optional[str] = None) -> tuple[List[InvoiceItem], List[dict]]:
@@ -3369,10 +3415,16 @@ def _month_date_range(period: str) -> tuple[str, str]:
 async def _postpaid_attendance_count(student_id: str, period: str) -> int:
     start_date, end_date = _month_date_range(period)
     billable_marks = ["P", "LT"]
-    return await db.attendance.count_documents({
+    theory_count = await db.attendance.count_documents({
         "session_date": {"$gte": start_date, "$lte": end_date},
+        "marked_via": {"$ne": "kiosk"},
         f"marks.{student_id}": {"$in": billable_marks},
     })
+    practice_count = await db.checkins.count_documents({
+        "student_id": student_id,
+        "check_in_date": {"$gte": start_date, "$lte": end_date},
+    })
+    return theory_count + practice_count
 
 def _compute_sub_status(end_iso: Optional[str]) -> str:
     if not end_iso:
@@ -3389,8 +3441,12 @@ def _compute_sub_status(end_iso: Optional[str]) -> str:
     return "active"
 
 async def _extend_subscription(student_id: str, plan: str, ref_date: Optional[date] = None) -> dict:
-    """Extend a student's subscription by the plan's day-count, anchored on the later of
-    today and the existing end-date. Persists subscription_start/end/status on the student doc."""
+    """Extend a student's subscription by the plan's day-count.
+
+    Renewals continue from the existing subscription expiry when one is present,
+    even if that expiry is already in the past. New subscriptions without an
+    expiry start from the payment/reference date.
+    """
     student = await db.students.find_one({"_id": oid(student_id)})
     if not student:
         return {}
@@ -3404,7 +3460,7 @@ async def _extend_subscription(student_id: str, plan: str, ref_date: Optional[da
         current_end = datetime.fromisoformat(current_end_iso).date() if current_end_iso else None
     except Exception:
         current_end = None
-    anchor = max(today, current_end) if current_end and current_end >= today else today
+    anchor = current_end or today
     new_end = anchor + timedelta(days=days)
     sub_start = student.get("subscription_start") or today.isoformat()
     new_end_iso = new_end.isoformat()
@@ -3471,7 +3527,6 @@ async def kiosk_checkin(payload: KioskAction):
         "check_out": None,
         "duration_minutes": None,
     }
-    await mark_student_present_from_kiosk(student, today_iso, now)
     res = await db.checkins.insert_one(doc)
     return {"status": "checked_in", "student_name": student["full_name"],
             "check_in": doc["check_in"], "id": str(res.inserted_id)}
@@ -3545,7 +3600,7 @@ async def extend_subscription_endpoint(sid: str, payload: SubExtendIn,
             current_end = datetime.fromisoformat(current_end_iso).date() if current_end_iso else None
         except Exception:
             current_end = None
-        anchor = max(today, current_end) if current_end and current_end >= today else today
+        anchor = current_end or today
         new_end = anchor + timedelta(days=int(payload.days))
         sub_start = s.get("subscription_start") or today.isoformat()
         new_end_iso = new_end.isoformat()
@@ -3635,24 +3690,57 @@ async def portal_data(token: str):
     # attendance
     batch_id = s.get("batch_id")
     sessions = await db.attendance.find(
-        {"batch_id": batch_id},
+        {"batch_id": batch_id, "marked_via": {"$ne": "kiosk"}},
         {"marks": 1, "session_date": 1, "topic": 1, "coach_id": 1, "coach_name": 1},
-    ).sort("session_date", -1).limit(60).to_list(60) if batch_id else []
-    counts = {"P": 0, "A": 0, "L": 0, "LT": 0, "H": 0}
+    ).sort("session_date", -1).to_list(5000) if batch_id else []
+    practice_sessions = await db.checkins.find({"student_id": sid_str}).sort("check_in_date", -1).to_list(5000)
+    counts = {
+        "P": 0, "A": 0, "present": 0, "absent": 0,
+        "theory_present": 0, "theory_absent": 0,
+        "practice_present": len(practice_sessions),
+    }
     history = []
     for sess in sessions:
-        st = (sess.get("marks") or {}).get(sid_str)
-        if st:
-            counts[st] = counts.get(st, 0) + 1
-            history.append({
-                "date": sess["session_date"],
-                "status": st,
-                "topic": sess.get("topic", ""),
-                "coach_id": sess.get("coach_id"),
-                "coach_name": sess.get("coach_name", ""),
-            })
-    total = counts["P"] + counts["A"] + counts["L"] + counts["LT"]
-    pct = round((counts["P"] + counts["LT"]) / total * 100, 1) if total else 0
+        mark = (sess.get("marks") or {}).get(sid_str)
+        if not mark or mark == "H":
+            continue
+        status = "P" if mark in ("P", "LT") else "A"
+        counts[status] += 1
+        if status == "P":
+            counts["present"] += 1
+            counts["theory_present"] += 1
+        else:
+            counts["absent"] += 1
+            counts["theory_absent"] += 1
+        history.append({
+            "date": sess["session_date"],
+            "status": status,
+            "label": "Present" if status == "P" else "Absent",
+            "session_type": "theory",
+            "topic": sess.get("topic", ""),
+            "coach_id": sess.get("coach_id"),
+            "coach_name": sess.get("coach_name", ""),
+        })
+    for checkin in practice_sessions:
+        counts["P"] += 1
+        counts["present"] += 1
+        history.append({
+            "date": checkin.get("check_in_date", ""),
+            "status": "P",
+            "label": "Present",
+            "session_type": "practice",
+            "topic": "Practice session",
+            "check_in": checkin.get("check_in"),
+            "check_out": checkin.get("check_out"),
+        })
+    theory_total = counts["theory_present"] + counts["theory_absent"]
+    total = theory_total + counts["practice_present"]
+    total_attended = counts["theory_present"] + counts["practice_present"]
+    counts["theory_total"] = theory_total
+    counts["total_classes"] = total
+    counts["total_attended"] = total_attended
+    history.sort(key=lambda row: row.get("date") or "", reverse=True)
+    pct = round(total_attended / total * 100, 1) if total else 0
     # invoices + receipts
     inv = await db.invoices.find({"student_id": sid_str}).sort("issued_at", -1).to_list(200)
     rec = await db.receipts.find({"student_id": sid_str}).sort("created_at", -1).to_list(200)
