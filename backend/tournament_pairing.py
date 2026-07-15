@@ -73,8 +73,10 @@ def generate_swiss_pairings(
     Returns (pairings, bye_player_id_or_None)
     pairings: list of {white: id, black: id}
     """
-    # Sort by (points desc, rating desc) which determines score groups
-    eligible = sorted(players, key=lambda p: (-p['points'], -p['rating']))
+    # Sort by score, then stored starting rank/pairing number, then rating.
+    # Lower pairing_number means higher starting rank. Older tournaments may
+    # not have pairing numbers yet, so rating remains the stable fallback.
+    eligible = sorted(players, key=lambda p: (-p['points'], p.get('pairing_number') or 999999, -p['rating']))
 
     bye_id = None
     if len(eligible) % 2 == 1:
@@ -99,7 +101,7 @@ def generate_swiss_pairings(
 
     def try_pair_group(group: List[dict]) -> Tuple[List[dict], List[dict]]:
         """Attempt to pair group via top-half vs bottom-half. Returns (pairs, leftover)."""
-        group = sorted(group, key=lambda p: (-p['rating']))
+        group = sorted(group, key=lambda p: (p.get('pairing_number') or 999999, -p['rating']))
         n = len(group)
         if n == 0:
             return [], []

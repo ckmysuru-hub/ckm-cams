@@ -4,7 +4,7 @@ import { api, API_BASE as API, formatApiError as formatError } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
 import { isDirector } from '@/lib/roles';
 import { toast } from 'sonner';
-import { Plus, Upload, Trash2, Printer, FileDown, Play, CheckCircle, ExternalLink, ChevronRight, Eye, Edit2, Settings, X } from 'lucide-react';
+import { Plus, Upload, Trash2, Printer, FileDown, Play, CheckCircle, ExternalLink, ChevronRight, Eye, Edit2, Settings, X, Shuffle } from 'lucide-react';
 
 const TABS = ['Players', 'Rounds', 'Standings', 'Audit', 'Exports'];
 
@@ -50,11 +50,12 @@ export default function TournamentDetail() {
         </div>
       </div>
 
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-6">
         <Stat label="Status" value={t.status?.replace('_', ' ')} accent />
         <Stat label="Rounds" value={`${t.current_round} / ${t.num_rounds}`} />
         <Stat label="Time Control" value={t.time_control} />
         <Stat label="Rating" value={t.rating_type} />
+        <Stat label="Cross Category" value={t.allow_cross_category_pairing === false ? 'No' : 'Yes'} />
       </div>
 
       <div className="border-b border-gray-200 mb-4 no-print overflow-x-auto">
@@ -84,6 +85,7 @@ function EditTournamentModal({ t, onClose, onSaved }) {
     name: t.name || '', venue: t.venue || '', num_rounds: t.num_rounds || 7,
     time_control: t.time_control || '90+30', chief_arbiter_name: t.chief_arbiter_name || '',
     bye_type: t.bye_type || 'half', notes: t.notes || '',
+    allow_cross_category_pairing: t.allow_cross_category_pairing !== false,
     public_visible: t.public_visible !== false, status: t.status || 'upcoming',
     categories: initCats.length ? initCats : [{ name: 'Open', fee: 0 }],
   });
@@ -98,6 +100,7 @@ function EditTournamentModal({ t, onClose, onSaved }) {
         name: f.name, venue: f.venue, num_rounds: +f.num_rounds, time_control: f.time_control,
         chief_arbiter_name: f.chief_arbiter_name, bye_type: f.bye_type, notes: f.notes,
         public_visible: f.public_visible, status: f.status,
+        allow_cross_category_pairing: f.allow_cross_category_pairing,
         sections: cats.map(c => c.name.trim()),
         fee_structure: Object.fromEntries(cats.map(c => [c.name.trim(), +c.fee || 0])),
       });
@@ -120,6 +123,13 @@ function EditTournamentModal({ t, onClose, onSaved }) {
             <label className={lbl}>Bye Type</label>
             <select value={f.bye_type} onChange={e => set('bye_type', e.target.value)} className={inp}>
               <option value="half">Half-point (0.5)</option><option value="full">Full-point (1.0)</option><option value="zero">Zero (0)</option>
+            </select>
+          </div>
+          <div>
+            <label className={lbl}>Cross Category Pairing</label>
+            <select value={f.allow_cross_category_pairing ? 'yes' : 'no'} onChange={e => set('allow_cross_category_pairing', e.target.value === 'yes')} className={inp}>
+              <option value="yes">Yes - pair across categories</option>
+              <option value="no">No - pair only within each category</option>
             </select>
           </div>
           <div>
@@ -198,7 +208,17 @@ function PlayersTab({ tid, user, t }) {
     await api.delete(`/tournaments/${tid}/players/${id}`); load();
   };
 
+  const randomizePositions = async () => {
+    if (!window.confirm('Randomize starting ranks for all players? This can only be done before round 1 is paired.')) return;
+    try {
+      const { data } = await api.post(`/tournaments/${tid}/players/randomize-positions`);
+      toast.success(`Randomized ${data.count} player positions`);
+      load();
+    } catch (e) { toast.error(formatError(e)); }
+  };
+
   const canEdit = isDirector(user);
+  const canRandomize = canEdit && Number(t.current_round || 0) < 1;
 
   return (
     <div>
@@ -208,6 +228,12 @@ function PlayersTab({ tid, user, t }) {
         <div className="text-sm text-gray-500">{filtered.length} of {players.length} players</div>
         {canEdit && (
           <div className="flex gap-2">
+            {canRandomize && (
+              <button onClick={randomizePositions} data-testid="randomize-positions-btn"
+                className="text-sm border border-[#F57C00] text-[#E65100] px-3 py-2 rounded-sm hover:bg-orange-50 flex items-center gap-1.5">
+                <Shuffle className="w-4 h-4" /> Randomize positions
+              </button>
+            )}
             <input ref={fileRef} type="file" accept=".csv" onChange={onImport} className="hidden" />
             <button onClick={() => fileRef.current?.click()} data-testid="import-csv-btn"
               className="text-sm border border-gray-300 px-3 py-2 rounded-sm hover:bg-gray-50 flex items-center gap-1.5">
@@ -225,14 +251,14 @@ function PlayersTab({ tid, user, t }) {
         <table className="ckm-table">
           <thead>
             <tr>
-              <th>#</th><th>Title</th><th>Name</th><th>Fed</th><th className="text-right">Rating</th>
+              <th>Rank</th><th>Title</th><th>Name</th><th>Fed</th><th className="text-right">Rating</th>
               <th>Club</th><th>Cat</th><th className="text-right">Pts</th><th>Pay</th><th>Status</th>{canEdit && <th></th>}
             </tr>
           </thead>
           <tbody data-testid="players-table">
             {filtered.map((p, i) => (
               <tr key={p.id} data-testid={`player-row-${p.id}`}>
-                <td className="font-mono text-gray-400">{i + 1}</td>
+                <td className="font-mono text-gray-400">{p.pairing_number || i + 1}</td>
                 <td className="font-semibold">{p.title}</td>
                 <td className="font-semibold">{p.first_name} {p.last_name}</td>
                 <td>{p.federation}</td>

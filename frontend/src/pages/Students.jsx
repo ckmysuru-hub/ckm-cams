@@ -26,7 +26,7 @@ import Pagination from "@/components/Pagination";
 
 const empty = {
   full_name: "", dob: "", gender: "male", parent_name: "", parent_whatsapp: "",
-  parent_email: "", address: "", level_id: "", batch_id: "", payment_plan: "monthly",
+  parent_email: "", address: "", level_id: "", batch_id: "", payment_plan: "monthly", billing_type: "prepaid",
   subscription_start: "", subscription_end: "", concession_pct: 0, referred_by: "", status: "active",
   photo_url: "",
 };
@@ -36,7 +36,7 @@ const pickForm = (s) => ({
   parent_name: s.parent_name || "", parent_whatsapp: s.parent_whatsapp || "",
   parent_email: s.parent_email || "", address: s.address || "",
   level_id: s.level_id || "", batch_id: s.batch_id || "",
-  payment_plan: s.payment_plan || "monthly", concession_pct: s.concession_pct ?? 0,
+  payment_plan: s.payment_plan || "monthly", billing_type: s.billing_type || "prepaid", concession_pct: s.concession_pct ?? 0,
   subscription_start: s.subscription_start || "", subscription_end: s.subscription_end || "",
   referred_by: s.referred_by || "", status: s.status || "active",
   photo_url: s.photo_url || "",
@@ -172,6 +172,7 @@ export default function Students() {
       batch: batchById[s.batch_id] || "",
       level: levelName(s.level_id),
       payment_plan: s.payment_plan || "",
+      billing_type: s.billing_type || "prepaid",
       status: s.status || "",
       subscription_start: s.subscription_start || "",
       subscription_end: s.subscription_end || "",
@@ -210,7 +211,7 @@ export default function Students() {
       [{
         full_name: "Sample Kid", dob: "2015-04-12", gender: "male",
         parent_name: "Parent", parent_whatsapp: "+919876543210", parent_email: "parent@example.com",
-        address: "Mysuru", payment_plan: "monthly", level_code: "BEG", batch_name: "Monday Evening",
+        address: "Mysuru", payment_plan: "monthly", billing_type: "prepaid", level_code: "BEG", batch_name: "Monday Evening",
         concession_pct: "0", referred_by: "Friend", enrollment_date: "",
       }],
       "students-import-template.csv",
@@ -300,6 +301,15 @@ export default function Students() {
                     </SelectContent>
                   </Select>
                 </Field>
+                <Field label="Billing Type">
+                  <Select value={form.billing_type || "prepaid"} onValueChange={(v)=>setForm({...form, billing_type:v})}>
+                    <SelectTrigger data-testid="sf-billing-type"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="prepaid">Prepaid</SelectItem>
+                      <SelectItem value="postpaid">Postpaid</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </Field>
                 <Field label="Concession %">
                   <Input type="number" min="0" max="100" data-testid="sf-concession" value={form.concession_pct} onChange={(e)=>setForm({...form, concession_pct:e.target.value})} />
                 </Field>
@@ -382,6 +392,7 @@ export default function Students() {
               <th>WhatsApp</th>
               <SortableHead label="Level" sortKey="level_id" sort={sort} onSort={setSort} />
               <SortableHead label="Plan" sortKey="payment_plan" sort={sort} onSort={setSort} />
+              <SortableHead label="Billing" sortKey="billing_type" sort={sort} onSort={setSort} />
               <SortableHead label="Subscription" sortKey="subscription_end" sort={sort} onSort={setSort} />
               <th>Status</th>
               <th className="text-right pr-4">Actions</th>
@@ -410,6 +421,11 @@ export default function Students() {
                   </Select>
                 </td>
                 <td className="capitalize">{s.payment_plan}</td>
+                <td className="capitalize">
+                  <span className={`ck-pill ${(s.billing_type || "prepaid") === "postpaid" ? "ck-pill-orange" : "ck-pill-green"}`}>
+                    {s.billing_type || "prepaid"}
+                  </span>
+                </td>
                 <td>
                   {s.subscription_end ? (
                     <span className={`ck-pill ${
@@ -442,7 +458,7 @@ export default function Students() {
               </tr>
             ))}
             {!sorted.length && (
-              <tr><td colSpan="9" className="text-center text-[var(--ck-muted)] py-10">No students match the current filters.</td></tr>
+              <tr><td colSpan="10" className="text-center text-[var(--ck-muted)] py-10">No students match the current filters.</td></tr>
             )}
           </tbody>
         </table>

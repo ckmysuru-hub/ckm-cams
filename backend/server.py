@@ -7,7 +7,9 @@ load_dotenv(ROOT_DIR / '.env')
 import os
 import io
 import csv
+import calendar
 import uuid
+import random
 import asyncio
 import logging
 import secrets
@@ -276,6 +278,7 @@ class StudentIn(BaseModel):
     batch_id: Optional[str] = None
     enrollment_date: Optional[str] = None
     payment_plan: Optional[str] = "monthly"  # monthly | quarterly | annual | custom
+    billing_type: Optional[str] = "prepaid"  # prepaid | postpaid
     subscription_start: Optional[str] = None
     subscription_end: Optional[str] = None
     concession_pct: Optional[float] = 0
@@ -310,6 +313,7 @@ class LevelIn(BaseModel):
     monthly_fee: float = 0
     quarterly_fee: float = 0
     annual_fee: float = 0
+    per_day_fee: float = 0
     custom_plan_name: Optional[str] = "Custom"
     custom_duration_days: int = 0
     custom_fee: float = 0
@@ -1359,6 +1363,7 @@ async def _student_email_context(student: dict) -> dict:
 @api.post("/students")
 async def create_student(payload: StudentIn, user: dict = Depends(require_role("ops_manager", "front_desk"))):
     doc = payload.model_dump()
+    doc["billing_type"] = _student_billing_type(doc)
     doc["student_code"] = await gen_student_code()
     doc["created_at"] = iso(now_utc())
     doc["created_by"] = user["id"]
@@ -1410,6 +1415,7 @@ async def update_student(sid: str, payload: StudentIn, user: dict = Depends(requ
     if not existing:
         raise HTTPException(404, "Student not found")
     doc = payload.model_dump()
+    doc["billing_type"] = _student_billing_type(doc)
     if doc.get("subscription_start") is None:
         doc["subscription_start"] = existing.get("subscription_start")
     if doc.get("subscription_end") is None:
@@ -1802,6 +1808,9 @@ async def create_subscription_renewal_invoices(target_date: Optional[date] = Non
     created, skipped = [], []
     for student in students:
         sid = str(student["_id"])
+        if _student_billing_type(student) == "postpaid":
+            skipped.append({"student_id": sid, "reason": "postpaid_student"})
+            continue
         if await db.invoices.find_one({
             "student_id": sid,
             "auto_invoice_kind": "subscription_renewal",
@@ -3342,6 +3351,29 @@ async def _student_plan_config(student: dict, plan: Optional[str] = None,
         "fee": float((level or {}).get(PLAN_FEE_FIELDS.get(selected, "monthly_fee")) or 0),
     }
 
+def _student_billing_type(student: dict) -> str:
+    billing_type = (student.get("billing_type") or "prepaid").strip().lower()
+    return billing_type if billing_type in ("prepaid", "postpaid") else "prepaid"
+
+def _month_date_range(period: str) -> tuple[str, str]:
+    try:
+        year_text, month_text = (period or "").split("-", 1)
+        year, month = int(year_text), int(month_text)
+        if month < 1 or month > 12:
+            raise ValueError
+    except Exception:
+        raise HTTPException(400, "Period must be in YYYY-MM format")
+    last_day = calendar.monthrange(year, month)[1]
+    return f"{year:04d}-{month:02d}-01", f"{year:04d}-{month:02d}-{last_day:02d}"
+
+async def _postpaid_attendance_count(student_id: str, period: str) -> int:
+    start_date, end_date = _month_date_range(period)
+    billable_marks = ["P", "LT"]
+    return await db.attendance.count_documents({
+        "session_date": {"$gte": start_date, "$lte": end_date},
+        f"marks.{student_id}": {"$in": billable_marks},
+    })
+
 def _compute_sub_status(end_iso: Optional[str]) -> str:
     if not end_iso:
         return "none"
@@ -3636,6 +3668,7 @@ async def portal_data(token: str):
             "batch": batch.get("name") if batch else None,
             "level": level.get("name") if level else None,
             "payment_plan": s.get("payment_plan"),
+            "billing_type": _student_billing_type(s),
             "subscription_start": s.get("subscription_start"),
             "subscription_end": s.get("subscription_end"),
             "subscription_status": _compute_sub_status(s.get("subscription_end")),
@@ -3741,15 +3774,35 @@ async def monthly_billing_run(payload: MonthlyRunIn, user: dict = Depends(requir
         if not lv:
             skipped.append({"student_id": sid_str, "reason": "level_missing"})
             continue
-        config = await _student_plan_config(s, level=lv)
-        fee_amt = float(config.get("fee") or 0)
-        if fee_amt <= 0:
-            skipped.append({"student_id": sid_str, "reason": "no_fee"})
-            continue
-        if config["plan"] == "custom" and int(config.get("days") or 0) <= 0:
-            skipped.append({"student_id": sid_str, "reason": "custom_plan_duration_missing"})
-            continue
-        items = [InvoiceItem(description=f"{lv['name']} - {config['label']} fee ({payload.period})", amount=fee_amt)]
+        billing_type = _student_billing_type(s)
+        postpaid_meta = None
+        if billing_type == "postpaid":
+            per_day_fee = float(lv.get("per_day_fee") or 0)
+            if per_day_fee <= 0:
+                skipped.append({"student_id": sid_str, "reason": "no_per_day_fee"})
+                continue
+            attended_count = await _postpaid_attendance_count(sid_str, payload.period)
+            if attended_count <= 0:
+                skipped.append({"student_id": sid_str, "reason": "no_billable_attendance"})
+                continue
+            postpaid_amount = round(per_day_fee * attended_count, 2)
+            items = [InvoiceItem(
+                description=f"{lv['name']} - Postpaid classes ({attended_count} x INR {per_day_fee:g}) ({payload.period})",
+                amount=postpaid_amount,
+            )]
+            postpaid_meta = {"attendance_count": attended_count, "per_day_fee": per_day_fee}
+            inv = None
+        else:
+            config = await _student_plan_config(s, level=lv)
+            fee_amt = float(config.get("fee") or 0)
+            if fee_amt <= 0:
+                skipped.append({"student_id": sid_str, "reason": "no_fee"})
+                continue
+            if config["plan"] == "custom" and int(config.get("days") or 0) <= 0:
+                skipped.append({"student_id": sid_str, "reason": "custom_plan_duration_missing"})
+                continue
+            items = [InvoiceItem(description=f"{lv['name']} - {config['label']} fee ({payload.period})", amount=fee_amt)]
+            inv = None
         carry_sources = []
 
         # Carry-over: include all pending balances from previous periods
@@ -3759,18 +3812,34 @@ async def monthly_billing_run(payload: MonthlyRunIn, user: dict = Depends(requir
 
         inv_payload = InvoiceIn(
             student_id=sid_str, period=payload.period, due_date=payload.due_date,
-            items=items, notes="Auto-generated by monthly run",
+            items=items, notes="Auto-generated by monthly run (postpaid)" if postpaid_meta else "Auto-generated by monthly run",
         )
-        inv = await _build_invoice_doc(inv_payload, user)
-        inv["payment_plan"] = config["plan"]
-        inv["plan_label"] = config["label"]
-        inv["plan_duration_days"] = config["days"]
+        rebuilt_inv = await _build_invoice_doc(inv_payload, user)
+        if postpaid_meta:
+            rebuilt_inv["billing_type"] = "postpaid"
+            rebuilt_inv["postpaid_attendance_count"] = postpaid_meta["attendance_count"]
+            rebuilt_inv["postpaid_per_day_fee"] = postpaid_meta["per_day_fee"]
+        else:
+            rebuilt_inv["billing_type"] = "prepaid"
+            rebuilt_inv["payment_plan"] = config["plan"]
+            rebuilt_inv["plan_label"] = config["label"]
+            rebuilt_inv["plan_duration_days"] = config["days"]
+        inv = rebuilt_inv
         if carry_sources:
             inv["carried_forward_from"] = carry_sources
         res = await db.invoices.insert_one(inv)
         if carry_sources:
             await _cancel_carried_forward_invoices(carry_sources, {**inv, "_id": res.inserted_id}, user)
-        created.append({"student_id": sid_str, "invoice_no": inv["invoice_no"], "amount": inv["amount"]})
+        created_item = {
+            "student_id": sid_str,
+            "invoice_no": inv["invoice_no"],
+            "amount": inv["amount"],
+            "billing_type": inv.get("billing_type", billing_type),
+        }
+        if postpaid_meta:
+            created_item["attendance_count"] = postpaid_meta["attendance_count"]
+            created_item["per_day_fee"] = postpaid_meta["per_day_fee"]
+        created.append(created_item)
 
     return {"created": created, "skipped": skipped, "total_created": len(created)}
 
@@ -3881,6 +3950,7 @@ async def confirm_registration(rid: str, payload: RegistrationConfirmIn,
         "level_id": payload.level_id,
         "batch_id": payload.batch_id or None,
         "payment_plan": payload.payment_plan,
+        "billing_type": "prepaid",
         "concession_pct": payload.concession_pct,
         "referred_by": reg.get("referred_by", ""),
         "status": "active",
@@ -3931,7 +4001,8 @@ class StudentImportRow(BaseModel):
 async def import_students(payload: StudentImportRow, user: dict = Depends(require_role("ops_manager", "front_desk"))):
     """Bulk import students. Expected fields per row:
     full_name, parent_name, parent_whatsapp, parent_email, dob, gender, address,
-    payment_plan (monthly|quarterly|annual|custom), level_code, batch_name, enrollment_date.
+    payment_plan (monthly|quarterly|annual|custom), billing_type (prepaid|postpaid),
+    level_code, batch_name, enrollment_date.
     Missing optional fields default to empty/none."""
     levels = await db.levels.find().to_list(500)
     batches = await db.batches.find().to_list(500)
@@ -3953,6 +4024,9 @@ async def import_students(payload: StudentImportRow, user: dict = Depends(requir
             plan = (row.get("payment_plan") or "monthly").strip().lower()
             if plan not in ("monthly", "quarterly", "annual", "custom"):
                 plan = "monthly"
+            billing_type = (row.get("billing_type") or "prepaid").strip().lower()
+            if billing_type not in ("prepaid", "postpaid"):
+                billing_type = "prepaid"
             doc = {
                 "full_name": full_name,
                 "dob": (row.get("dob") or "").strip() or None,
@@ -3964,6 +4038,7 @@ async def import_students(payload: StudentImportRow, user: dict = Depends(requir
                 "level_id": level_id,
                 "batch_id": batch_id,
                 "payment_plan": plan,
+                "billing_type": billing_type,
                 "concession_pct": float(row.get("concession_pct") or 0),
                 "referred_by": (row.get("referred_by") or "").strip(),
                 "status": "active",
@@ -4337,6 +4412,7 @@ class TournamentIn(BaseModel):
     tiebreak_order: List[str] = ["buchholz", "sb", "direct_encounter"]
     bye_type: str = "half"  # half / full / zero
     allow_late_entries_until_round: int = 1
+    allow_cross_category_pairing: bool = True
     sections: List[str] = ["Open"]
     fee_structure: Dict[str, float] = {}
     notes: str = ""
@@ -4398,7 +4474,8 @@ async def update_tournament(tid: str, payload: dict, user: dict = Depends(requir
     if not t:
         raise HTTPException(404, "Not found")
     allowed = {"name", "venue", "num_rounds", "time_control", "chief_arbiter_name", "tiebreak_order",
-              "bye_type", "notes", "public_visible", "status", "sections", "fee_structure"}
+              "bye_type", "notes", "public_visible", "status", "sections", "fee_structure",
+              "allow_cross_category_pairing"}
     upd = {k: v for k, v in payload.items() if k in allowed}
     await db.tournament_tournaments.update_one({"id": tid}, {"$set": upd})
     await _tournament_audit(tid, user, "tournament_update", "tournament", tid, before=_tournament_clean(t), after=upd)
@@ -4407,15 +4484,16 @@ async def update_tournament(tid: str, payload: dict, user: dict = Depends(requir
 # ---- players ----
 @api.get("/tournaments/{tid}/players")
 async def list_tournament_players(tid: str, _: dict = Depends(require_role("director"))):
-    return await db.tournament_players.find({"tournament_id": tid}, {"_id": 0}).sort([("fide_rating", -1)]).to_list(2000)
+    return await db.tournament_players.find({"tournament_id": tid}, {"_id": 0}).sort([("pairing_number", 1), ("fide_rating", -1)]).to_list(2000)
 
 @api.post("/tournaments/{tid}/players")
 async def add_tournament_player(tid: str, payload: TournamentPlayerIn, user: dict = Depends(require_role("director"))):
     if payload.fide_id and await db.tournament_players.find_one({"tournament_id": tid, "fide_id": payload.fide_id}):
         raise HTTPException(409, "FIDE ID already registered in this tournament")
     doc = payload.model_dump()
+    next_pairing_number = await db.tournament_players.count_documents({"tournament_id": tid}) + 1
     doc.update({"id": make_id(), "tournament_id": tid, "points": 0.0, "color_history": [],
-               "opponents": [], "byes": 0, "created_at": iso(now_utc())})
+               "opponents": [], "byes": 0, "pairing_number": next_pairing_number, "created_at": iso(now_utc())})
     await db.tournament_players.insert_one(doc)
     await _tournament_audit(tid, user, "player_add", "player", doc["id"], after=doc)
     doc.pop("_id", None)
@@ -4471,7 +4549,8 @@ async def import_tournament_players_csv(tid: str, file: UploadFile = File(...), 
                 "category": (row.get("category") or "Open").strip(), "section": (row.get("section") or "Open").strip(),
                 "payment_status": (row.get("payment_status") or "unpaid").strip(),
                 "notes": "", "status": "active", "points": 0.0, "color_history": [], "opponents": [],
-                "byes": 0, "created_at": iso(now_utc()),
+                "byes": 0, "pairing_number": await db.tournament_players.count_documents({"tournament_id": tid}) + 1,
+                "created_at": iso(now_utc()),
             }
             await db.tournament_players.insert_one(doc)
             added += 1
@@ -4479,6 +4558,30 @@ async def import_tournament_players_csv(tid: str, file: UploadFile = File(...), 
             errors.append({"row": i, "error": str(e)})
     await _tournament_audit(tid, user, "players_import", "tournament", tid, after={"added": added, "errors": len(errors)})
     return {"added": added, "errors": errors}
+
+@api.post("/tournaments/{tid}/players/randomize-positions")
+async def randomize_tournament_player_positions(tid: str, user: dict = Depends(require_role("director"))):
+    t = await db.tournament_tournaments.find_one({"id": tid})
+    if not t:
+        raise HTTPException(404, "Tournament not found")
+    first_round = await db.tournament_rounds.find_one({"tournament_id": tid, "round_number": 1})
+    if first_round and first_round.get("status") not in ("pending",):
+        raise HTTPException(400, "Player positions can only be randomized before round 1 is paired")
+    players = await db.tournament_players.find({"tournament_id": tid}).to_list(2000)
+    if len(players) < 2:
+        raise HTTPException(400, "Need at least two players to randomize positions")
+    shuffled = list(players)
+    random.shuffle(shuffled)
+    for i, player in enumerate(shuffled, start=1):
+        await db.tournament_players.update_one(
+            {"id": player["id"], "tournament_id": tid},
+            {"$set": {"pairing_number": i, "pairing_randomized_at": iso(now_utc())}},
+        )
+    await _tournament_audit(
+        tid, user, "players_randomize_positions", "tournament", tid,
+        after={"count": len(shuffled), "order": [{"id": p["id"], "pairing_number": i} for i, p in enumerate(shuffled, start=1)]},
+    )
+    return {"ok": True, "count": len(shuffled)}
 
 # ---- rounds & pairings ----
 @api.get("/tournaments/{tid}/rounds")
@@ -4516,14 +4619,42 @@ async def pair_tournament_round(tid: str, rnum: int, user: dict = Depends(requir
         raise HTTPException(400, f"Round {rnum} already paired")
 
     players = await db.tournament_players.find({"tournament_id": tid, "status": "active"}).to_list(2000)
-    p_in, past_opps, byes = [], {}, {}
-    for p in players:
-        p_in.append({"id": p["id"], "rating": p.get("fide_rating") or 0, "points": p.get("points", 0.0),
-                    "color_history": p.get("color_history", []), "pairing_number": 0})
-        past_opps[p["id"]] = set(p.get("opponents", []))
-        byes[p["id"]] = p.get("byes", 0)
+    past_opps = {p["id"]: set(p.get("opponents", [])) for p in players}
+    byes = {p["id"]: p.get("byes", 0) for p in players}
 
-    pairings, bye_id = generate_swiss_pairings(p_in, past_opps, byes)
+    def pairing_input(batch: List[dict]) -> List[dict]:
+        return [
+            {
+                "id": p["id"],
+                "rating": p.get("fide_rating") or 0,
+                "points": p.get("points", 0.0),
+                "color_history": p.get("color_history", []),
+                "pairing_number": p.get("pairing_number") or 999999,
+            }
+            for p in batch
+        ]
+
+    pairings, bye_ids = [], []
+    if t.get("allow_cross_category_pairing", True):
+        pairings, bye_id = generate_swiss_pairings(pairing_input(players), past_opps, byes)
+        if bye_id:
+            bye_ids.append(bye_id)
+    else:
+        category_order = [c for c in (t.get("sections") or []) if c]
+        categories = {}
+        for p in players:
+            key = p.get("category") or p.get("section") or "Open"
+            categories.setdefault(key, []).append(p)
+            if key not in category_order:
+                category_order.append(key)
+        for category in category_order:
+            batch = categories.get(category, [])
+            if not batch:
+                continue
+            batch_pairings, bye_id = generate_swiss_pairings(pairing_input(batch), past_opps, byes)
+            pairings.extend(batch_pairings)
+            if bye_id:
+                bye_ids.append(bye_id)
 
     await db.tournament_pairings.delete_many({"tournament_id": tid, "round_number": rnum})
     docs = []
@@ -4531,8 +4662,8 @@ async def pair_tournament_round(tid: str, rnum: int, user: dict = Depends(requir
         docs.append({"id": make_id(), "tournament_id": tid, "round_number": rnum, "board_number": i,
                     "white_player_id": pr["white"], "black_player_id": pr["black"],
                     "result": "", "is_bye": False, "created_at": iso(now_utc())})
-    if bye_id:
-        docs.append({"id": make_id(), "tournament_id": tid, "round_number": rnum, "board_number": len(pairings) + 1,
+    for bye_id in bye_ids:
+        docs.append({"id": make_id(), "tournament_id": tid, "round_number": rnum, "board_number": len(docs) + 1,
                     "white_player_id": bye_id, "black_player_id": None,
                     "result": "BYE", "is_bye": True, "created_at": iso(now_utc())})
     if docs:
@@ -4544,7 +4675,8 @@ async def pair_tournament_round(tid: str, rnum: int, user: dict = Depends(requir
     )
     await db.tournament_tournaments.update_one({"id": tid}, {"$set": {"current_round": rnum, "status": "in_progress"}})
     await _tournament_audit(tid, user, "pairings_generate", "round", str(rnum),
-                            after={"pairings": len(pairings), "bye": bool(bye_id)})
+                            after={"pairings": len(pairings), "byes": len(bye_ids),
+                                   "allow_cross_category_pairing": t.get("allow_cross_category_pairing", True)})
     return await _get_tournament_round_pairings(tid, rnum)
 
 @api.post("/tournaments/{tid}/rounds/{rnum}/results")

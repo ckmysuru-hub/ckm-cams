@@ -29,6 +29,7 @@ export default function TournamentSetup() {
     rating_type: 'FIDE Standard',
     tiebreak_order: ['buchholz', 'sb', 'direct_encounter'],
     bye_type: 'half',
+    allow_cross_category_pairing: true,
     categories: [{ name: 'Open', fee: 500 }],
     notes: '',
     public_visible: true,
@@ -119,6 +120,19 @@ export default function TournamentSetup() {
                 <option value="zero">Zero-point (0)</option>
               </select>
             </div>
+            <div>
+              <Label>Cross Category Pairing</Label>
+              <select
+                className="w-full px-3 py-2 border border-gray-300 rounded-sm"
+                value={form.allow_cross_category_pairing ? 'yes' : 'no'}
+                onChange={e => set('allow_cross_category_pairing', e.target.value === 'yes')}
+                data-testid="wiz-cross-category"
+              >
+                <option value="yes">Yes - pair across categories</option>
+                <option value="no">No - pair only within each category</option>
+              </select>
+              <p className="text-xs text-gray-500 mt-1">Choose No when categories should run as separate pairing pools.</p>
+            </div>
             <div className="text-xs text-gray-500">Tie-Break Order: <span className="font-mono">{form.tiebreak_order.join(' › ')}</span></div>
           </div>
         )}
@@ -164,6 +178,7 @@ export default function TournamentSetup() {
               <div><span className="text-gray-500 text-xs uppercase">Venue</span><div className="font-semibold">{form.venue || '—'}</div></div>
               <div><span className="text-gray-500 text-xs uppercase">Dates</span><div className="font-semibold">{form.start_date} → {form.end_date}</div></div>
               <div><span className="text-gray-500 text-xs uppercase">Rounds</span><div className="font-semibold">{form.num_rounds} · {form.time_control}</div></div>
+              <div><span className="text-gray-500 text-xs uppercase">Cross Category Pairing</span><div className="font-semibold">{form.allow_cross_category_pairing ? 'Allowed' : 'Not allowed'}</div></div>
               <div className="col-span-2"><span className="text-gray-500 text-xs uppercase">Categories</span>
                 <div className="mt-1 space-y-1">
                   {form.categories.map((c, i) => (

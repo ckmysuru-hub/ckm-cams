@@ -12,7 +12,7 @@ import Pagination from "@/components/Pagination";
 const empty = {
   name:"", code:"", program:"Standard", duration_months:3, sessions_per_week:2,
   curriculum:"", admission_fee:0, monthly_fee:0, quarterly_fee:0, annual_fee:0,
-  custom_plan_name:"Custom", custom_duration_days:0, custom_fee:0,
+  per_day_fee:0, custom_plan_name:"Custom", custom_duration_days:0, custom_fee:0,
   exam_fee:0, material_fee:0, late_penalty:0, status:"active",
 };
 const pickForm = (l) => ({
@@ -20,6 +20,7 @@ const pickForm = (l) => ({
   duration_months: l.duration_months ?? 3, sessions_per_week: l.sessions_per_week ?? 2,
   curriculum: l.curriculum||"", admission_fee: l.admission_fee||0, monthly_fee: l.monthly_fee||0,
   quarterly_fee: l.quarterly_fee||0, annual_fee: l.annual_fee||0,
+  per_day_fee: l.per_day_fee || 0,
   custom_plan_name: l.custom_plan_name || "Custom", custom_duration_days: l.custom_duration_days || 0,
   custom_fee: l.custom_fee || 0, exam_fee: l.exam_fee||0,
   material_fee: l.material_fee||0, late_penalty: l.late_penalty||0, status: l.status||"active",
@@ -45,7 +46,7 @@ export default function Levels() {
     e.preventDefault();
     try {
       const payload = { ...form };
-      ["duration_months","sessions_per_week","admission_fee","monthly_fee","quarterly_fee","annual_fee","custom_duration_days","custom_fee","exam_fee","material_fee","late_penalty"]
+      ["duration_months","sessions_per_week","admission_fee","monthly_fee","quarterly_fee","annual_fee","per_day_fee","custom_duration_days","custom_fee","exam_fee","material_fee","late_penalty"]
         .forEach((k)=>{ payload[k] = Number(payload[k] || 0); });
       if (editingId) {
         await api.put(`/levels/${editingId}`, payload);
@@ -103,6 +104,7 @@ export default function Levels() {
                 <Field label="Monthly Fee"><Input type="number" data-testid="lf-monthly" value={form.monthly_fee} onChange={(e)=>setForm({...form, monthly_fee:e.target.value})} /></Field>
                 <Field label="Quarterly Fee"><Input type="number" value={form.quarterly_fee} onChange={(e)=>setForm({...form, quarterly_fee:e.target.value})} /></Field>
                 <Field label="Annual Fee"><Input type="number" value={form.annual_fee} onChange={(e)=>setForm({...form, annual_fee:e.target.value})} /></Field>
+                <Field label="Per Day Fee"><Input type="number" min="0" data-testid="lf-per-day" value={form.per_day_fee} onChange={(e)=>setForm({...form, per_day_fee:e.target.value})} /></Field>
                 <Field label="Custom Plan Name"><Input value={form.custom_plan_name} onChange={(e)=>setForm({...form, custom_plan_name:e.target.value})} /></Field>
                 <Field label="Custom Duration (days)"><Input type="number" min="0" value={form.custom_duration_days} onChange={(e)=>setForm({...form, custom_duration_days:e.target.value})} /></Field>
                 <Field label="Custom Fee"><Input type="number" value={form.custom_fee} onChange={(e)=>setForm({...form, custom_fee:e.target.value})} /></Field>
@@ -135,6 +137,7 @@ export default function Levels() {
               <div className="text-[var(--ck-muted)]">Monthly</div><div className="text-right font-medium">{fmt(l.monthly_fee)}</div>
               <div className="text-[var(--ck-muted)]">Quarterly</div><div className="text-right">{fmt(l.quarterly_fee)}</div>
               <div className="text-[var(--ck-muted)]">Annual</div><div className="text-right">{fmt(l.annual_fee)}</div>
+              <div className="text-[var(--ck-muted)]">Per Day</div><div className="text-right font-medium">{fmt(l.per_day_fee)}</div>
               <div className="text-[var(--ck-muted)]">{l.custom_plan_name || "Custom"} ({l.custom_duration_days || 0}d)</div><div className="text-right">{fmt(l.custom_fee)}</div>
               <div className="text-[var(--ck-muted)]">Exam</div><div className="text-right">{fmt(l.exam_fee)}</div>
               <div className="text-[var(--ck-muted)]">Material</div><div className="text-right">{fmt(l.material_fee)}</div>
@@ -163,6 +166,7 @@ export default function Levels() {
               <th className="text-right">Monthly</th>
               <th className="text-right">Quarterly</th>
               <th className="text-right">Annual</th>
+              <th className="text-right">Per Day</th>
               <th className="text-right">Custom</th>
               <th className="text-right pr-4">Actions</th>
             </tr>
@@ -177,6 +181,7 @@ export default function Levels() {
                 <td className="text-right">{fmt(l.monthly_fee)}</td>
                 <td className="text-right">{fmt(l.quarterly_fee)}</td>
                 <td className="text-right">{fmt(l.annual_fee)}</td>
+                <td className="text-right">{fmt(l.per_day_fee)}</td>
                 <td className="text-right">{fmt(l.custom_fee)} · {l.custom_duration_days || 0}d</td>
                 <td className="pr-4">
                   <div className="flex justify-end gap-1">
@@ -190,7 +195,7 @@ export default function Levels() {
                 </td>
               </tr>
             ))}
-            {!items.length && <tr><td colSpan="9" className="text-center text-[var(--ck-muted)] py-8">No levels yet. Add your first.</td></tr>}
+            {!items.length && <tr><td colSpan="10" className="text-center text-[var(--ck-muted)] py-8">No levels yet. Add your first.</td></tr>}
           </tbody>
         </table>
       </div>

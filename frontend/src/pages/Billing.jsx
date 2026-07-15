@@ -39,6 +39,7 @@ const downloadBlob = (blob, filename) => {
   URL.revokeObjectURL(url);
 };
 const planLabel = (student, level) =>
+  student?.billing_type === "postpaid" ? "Postpaid class" :
   student?.payment_plan === "custom" ? (level?.custom_plan_name || "Custom") :
   student?.payment_plan === "quarterly" ? "Quarterly" :
   student?.payment_plan === "annual" ? "Annual" : "Monthly";
@@ -80,11 +81,17 @@ export default function Billing() {
     if (s.level_id) {
       const lv = levels.find((l)=>l.id===s.level_id);
       if (lv) {
-        const amt = s.payment_plan === "custom"    ? lv.custom_fee
+        const amt = s.billing_type === "postpaid" ? lv.per_day_fee
+                  : s.payment_plan === "custom"    ? lv.custom_fee
                   : s.payment_plan === "quarterly" ? lv.quarterly_fee
                   : s.payment_plan === "annual"    ? lv.annual_fee
                   : lv.monthly_fee;
-        newItems.push({ description: `${lv.name} - ${planLabel(s, lv)} fee`, amount: Number(amt || 0) });
+        newItems.push({
+          description: s.billing_type === "postpaid"
+            ? `${lv.name} - Postpaid class fee (per day)`
+            : `${lv.name} - ${planLabel(s, lv)} fee`,
+          amount: Number(amt || 0),
+        });
       }
     }
     // Auto-add outstanding balance from prior invoices
@@ -170,7 +177,10 @@ export default function Billing() {
     const rows = sorted.map((i) => ({
       invoice_no: i.invoice_no, student_name: i.student_name, parent_phone: i.parent_whatsapp || "", period: i.period,
       due_date: i.due_date, amount: i.amount, discount: i.discount || 0, paid: i.paid, balance: i.balance,
-      status: i.status, reminder_count: i.reminder_count || 0, last_reminded_at: i.last_reminded_at || "",
+      status: i.status, billing_type: i.billing_type || "prepaid",
+      postpaid_attendance_count: i.postpaid_attendance_count || "",
+      postpaid_per_day_fee: i.postpaid_per_day_fee || "",
+      reminder_count: i.reminder_count || 0, last_reminded_at: i.last_reminded_at || "",
       issued_at: (i.issued_at || "").slice(0,10),
     }));
     if (!rows.length) { toast.error("Nothing to export"); return; }
@@ -405,7 +415,7 @@ export default function Billing() {
           <DialogHeader><DialogTitle>Monthly billing run</DialogTitle></DialogHeader>
           <form onSubmit={runMonthly} className="space-y-4" data-testid="monthly-run-form">
             <p className="text-sm text-[var(--ck-muted)]">
-              Generates one invoice for every active student based on their assigned level and payment plan. Students who already have an invoice for this period are skipped.
+              Generates prepaid invoices from the student's payment plan and postpaid invoices from billable attendance in the selected month. Students who already have an invoice for this period are skipped.
             </p>
             <div className="grid grid-cols-2 gap-3">
               <Field label="Period (YYYY-MM)">
@@ -430,6 +440,11 @@ export default function Billing() {
                 {runResult.skipped?.length > 0 && (
                   <div className="text-[11px] text-[var(--ck-muted)]">
                     Skipped reasons: {[...new Set(runResult.skipped.map((s)=>s.reason))].join(", ")}
+                  </div>
+                )}
+                {runResult.created?.some((item)=>item.billing_type === "postpaid") && (
+                  <div className="text-[11px] text-green-800">
+                    Postpaid invoices: {runResult.created.filter((item)=>item.billing_type === "postpaid").length}
                   </div>
                 )}
               </div>
