@@ -12,6 +12,7 @@ import { downloadCsv } from "@/lib/csv";
 import { SortableHead, applySort } from "@/components/SortableHead";
 import { usePagination } from "@/lib/usePagination";
 import Pagination from "@/components/Pagination";
+import TableActions, { TableActionItem } from "@/components/TableActions";
 
 const fmt = (n) => `₹${Number(n||0).toLocaleString("en-IN")}`;
 const today = () => new Date().toISOString().slice(0,10);
@@ -65,6 +66,7 @@ export default function Billing() {
     include_pending: true,
   });
   const [runResult, setRunResult] = useState(null);
+  const billableStudents = students.filter((s) => (s.status || "active") === "active");
 
   const load = () => api.get("/invoices").then((r)=>setItems(r.data));
   useEffect(() => {
@@ -222,12 +224,12 @@ export default function Billing() {
             <DialogContent className="max-w-2xl">
               <DialogHeader><DialogTitle>Create invoice</DialogTitle></DialogHeader>
               <form onSubmit={submit} className="space-y-4" data-testid="invoice-form">
-                <div className="grid grid-cols-3 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <Field label="Student" full={false}>
                     <Select value={form.student_id} onValueChange={onSelectStudent}>
                       <SelectTrigger data-testid="if-student"><SelectValue placeholder="Select student" /></SelectTrigger>
                       <SelectContent>
-                        {students.map((s)=>(<SelectItem key={s.id} value={s.id}>{s.full_name} · {s.student_code}</SelectItem>))}
+                        {billableStudents.map((s)=>(<SelectItem key={s.id} value={s.id}>{s.full_name} · {s.student_code}</SelectItem>))}
                       </SelectContent>
                     </Select>
                   </Field>
@@ -245,10 +247,10 @@ export default function Billing() {
                     <button type="button" className="text-xs text-[var(--ck-orange)] font-semibold" onClick={addItem}>+ Add line</button>
                   </div>
                   {form.items.map((it, idx)=>(
-                    <div className="grid grid-cols-12 gap-2 mb-2" key={idx}>
-                      <Input data-testid={`if-desc-${idx}`} className="col-span-8" placeholder="Description" value={it.description} onChange={(e)=>updItem(idx,"description",e.target.value)} required />
-                      <Input data-testid={`if-amt-${idx}`} className="col-span-3" type="number" placeholder="Amount" value={it.amount} onChange={(e)=>updItem(idx,"amount",e.target.value)} required />
-                      <button type="button" onClick={()=>rmItem(idx)} className="col-span-1 text-[var(--ck-muted)] hover:text-red-600"><Trash2 size={14}/></button>
+                    <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 mb-2" key={idx}>
+                      <Input data-testid={`if-desc-${idx}`} className="sm:col-span-8" placeholder="Description" value={it.description} onChange={(e)=>updItem(idx,"description",e.target.value)} required />
+                      <Input data-testid={`if-amt-${idx}`} className="sm:col-span-3" type="number" placeholder="Amount" value={it.amount} onChange={(e)=>updItem(idx,"amount",e.target.value)} required />
+                      <button type="button" onClick={()=>rmItem(idx)} className="h-10 sm:col-span-1 text-[var(--ck-muted)] hover:text-red-600 inline-flex items-center justify-center rounded-md border border-[var(--ck-line)]"><Trash2 size={14}/></button>
                     </div>
                   ))}
 
@@ -272,9 +274,9 @@ export default function Billing() {
                             value={form.notes} onChange={(e)=>setForm({...form, notes: e.target.value})} className="mt-1.5" />
                 </div>
 
-                <div className="flex justify-end gap-2">
-                  <button type="button" className="ck-btn-ghost" onClick={()=>setOpen(false)}>Cancel</button>
-                  <button type="submit" className="ck-btn-primary" data-testid="if-submit">Create invoice</button>
+                <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2">
+                  <button type="button" className="ck-btn-ghost justify-center" onClick={()=>setOpen(false)}>Cancel</button>
+                  <button type="submit" className="ck-btn-primary justify-center" data-testid="if-submit">Create invoice</button>
                 </div>
               </form>
             </DialogContent>
@@ -327,15 +329,7 @@ export default function Billing() {
             {pageItems.map((inv)=>(
               <tr key={inv.id}>
                 <td className="px-4 py-3 font-mono text-xs">
-                  <button
-                    type="button"
-                    onClick={()=>downloadInvoicePdf(inv)}
-                    className="font-semibold text-[var(--ck-orange)] hover:underline"
-                    data-testid={`inv-pdf-${inv.id}`}
-                    title="Download invoice PDF"
-                  >
-                    {inv.invoice_no}
-                  </button>
+                  <span className="font-semibold">{inv.invoice_no}</span>
                 </td>
                 <td>{inv.student_name}</td>
                 <td className="text-[var(--ck-muted)] text-xs font-mono">{inv.parent_whatsapp || "—"}</td>
@@ -343,28 +337,17 @@ export default function Billing() {
                 <td className="text-[var(--ck-muted)]">{inv.due_date}</td>
                 <td className="text-right">{fmt(inv.amount)}</td>
                 <td className="text-right font-medium">{fmt(inv.balance)}</td>
-                <td className="text-[var(--ck-muted)] text-xs whitespace-nowrap">
+                <td className="text-left text-[var(--ck-muted)] text-xs whitespace-nowrap">
                   {inv.last_reminded_at ? fmtDateTime(inv.last_reminded_at) : "—"}
                 </td>
                 <td className="pr-4">
-                  <div className="flex justify-end gap-1">
-                    <button
-                      className="att-btn flex items-center gap-1"
-                      onClick={()=>remind(inv.id)}
-                      disabled={inv.status === "paid" || inv.status === "cancelled"}
-                      data-testid={`inv-remind-${inv.id}`}
-                      title={`${inv.reminder_count || 0} reminder${Number(inv.reminder_count || 0) === 1 ? "" : "s"} sent${inv.last_reminded_at ? ` · Last: ${fmtDateTime(inv.last_reminded_at)}` : ""}`}
-                    >
-                      <Bell size={12}/> Remind {inv.reminder_count ? `(${inv.reminder_count})` : ""}
-                    </button>
-                    {inv.status !== "paid" && inv.status !== "cancelled" && (
-                      <button className="att-btn active P flex items-center gap-1"
-                        onClick={()=>{ setPayOpen(inv); setPay({ amount: inv.balance, mode:"cash", transaction_ref:"" }); }}
-                        data-testid={`inv-pay-${inv.id}`}>
-                        <IndianRupee size={12}/> Pay
-                      </button>
-                    )}
-                    <button className="att-btn flex items-center gap-1" onClick={()=>del(inv.id)}><Trash2 size={12}/></button>
+                  <div className="flex justify-end">
+                    <TableActions testId={`inv-actions-${inv.id}`}>
+                      <TableActionItem icon={Download} onSelect={()=>downloadInvoicePdf(inv)} data-testid={`inv-pdf-${inv.id}`}>Download PDF</TableActionItem>
+                      <TableActionItem icon={Bell} disabled={inv.status === "paid" || inv.status === "cancelled"} onSelect={()=>remind(inv.id)} data-testid={`inv-remind-${inv.id}`}>Remind {inv.reminder_count ? `(${inv.reminder_count})` : ""}</TableActionItem>
+                      <TableActionItem icon={IndianRupee} disabled={inv.status === "paid" || inv.status === "cancelled"} onSelect={()=>{ setPayOpen(inv); setPay({ amount: inv.balance, mode:"cash", transaction_ref:"" }); }} data-testid={`inv-pay-${inv.id}`}>Record payment</TableActionItem>
+                      <TableActionItem icon={Trash2} className="text-red-600 focus:text-red-700" onSelect={()=>del(inv.id)}>Delete</TableActionItem>
+                    </TableActions>
                   </div>
                 </td>
               </tr>
@@ -402,9 +385,9 @@ export default function Billing() {
               <Field label="Transaction Reference (optional)">
                 <Input value={pay.transaction_ref} onChange={(e)=>setPay({...pay, transaction_ref:e.target.value})} />
               </Field>
-              <div className="flex justify-end gap-2">
-                <button type="button" className="ck-btn-ghost" onClick={()=>setPayOpen(null)}>Cancel</button>
-                <button type="submit" className="ck-btn-primary" data-testid="pf-submit">Record & Generate Receipt</button>
+              <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2">
+                <button type="button" className="ck-btn-ghost justify-center" onClick={()=>setPayOpen(null)}>Cancel</button>
+                <button type="submit" className="ck-btn-primary justify-center" data-testid="pf-submit">Record & Generate Receipt</button>
               </div>
             </form>
           )}

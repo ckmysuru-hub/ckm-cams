@@ -9,6 +9,7 @@ import { SortableHead, applySort } from "@/components/SortableHead";
 import { toast } from "sonner";
 import { usePagination } from "@/lib/usePagination";
 import Pagination from "@/components/Pagination";
+import TableActions, { TableActionItem } from "@/components/TableActions";
 
 const fmt = (n) => `₹${Number(n||0).toLocaleString("en-IN")}`;
 const downloadBlob = (blob, filename) => {
@@ -101,29 +102,27 @@ export default function Receipts() {
               <SortableHead label="Date" sortKey="created_at" sort={sort} onSort={setSort} />
               <SortableHead label="Mode" sortKey="mode" sort={sort} onSort={setSort} />
               <SortableHead className="text-right" label="Amount" sortKey="amount" sort={sort} onSort={setSort} />
+              <th className="text-right pr-4">Actions</th>
             </tr>
           </thead>
           <tbody>
             {pageItems.map((r)=>(
               <tr key={r.id}>
                 <td className="px-4 py-3 font-mono text-xs">
-                  <button
-                    type="button"
-                    onClick={()=>downloadReceiptPdf(r)}
-                    className="font-semibold text-[var(--ck-orange)] hover:underline"
-                    data-testid={`rcp-pdf-${r.id}`}
-                    title="Download receipt PDF"
-                  >
-                    {r.receipt_no}
-                  </button>
+                  <span className="font-semibold">{r.receipt_no}</span>
                 </td>
                 <td>{r.student_name}</td>
                 <td className="text-[var(--ck-muted)]">{r.created_at?.slice(0,10)}</td>
                 <td className="uppercase text-xs">{r.mode}</td>
                 <td className="text-right font-medium">{fmt(r.amount)}</td>
+                <td className="text-right pr-4">
+                  <TableActions testId={`receipt-actions-${r.id}`}>
+                    <TableActionItem icon={Download} onSelect={()=>downloadReceiptPdf(r)} data-testid={`rcp-pdf-${r.id}`}>Download PDF</TableActionItem>
+                  </TableActions>
+                </td>
               </tr>
             ))}
-            {!sorted.length && (<tr><td colSpan="5" className="text-center text-[var(--ck-muted)] py-8">No receipts match the current filters.</td></tr>)}
+            {!sorted.length && (<tr><td colSpan="6" className="text-center text-[var(--ck-muted)] py-8">No receipts match the current filters.</td></tr>)}
           </tbody>
         </table>
       </div>

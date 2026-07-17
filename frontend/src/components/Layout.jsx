@@ -77,7 +77,7 @@ export default function Layout() {
             <X size={17} />
           </button>
         </div>
-        <nav className="flex-1 py-4 text-sm">
+        <nav className="flex-1 min-h-0 overflow-y-auto py-4 text-sm">
           {visibleNav.map(({ to, label, icon: Icon, end, testid }) => (
             <NavLink
               key={to}
@@ -104,7 +104,7 @@ export default function Layout() {
             <span className={collapsed ? "md:hidden" : ""}>Open Kiosk ↗</span>
           </a>
         </nav>
-        <div className={`px-5 py-4 border-t border-white/5 ${collapsed ? "md:px-0 md:flex md:flex-col md:items-center" : ""}`}>
+        <div className={`shrink-0 px-5 py-4 border-t border-white/5 ${collapsed ? "md:px-0 md:flex md:flex-col md:items-center" : ""}`}>
           {(!collapsed || mobileOpen) && (
             <>
               <div className="text-xs text-white/50 mb-2">Signed in as</div>
@@ -133,9 +133,9 @@ export default function Layout() {
         </div>
       </aside>
 
-      <header className="md:hidden fixed top-0 inset-x-0 z-40 bg-white/95 backdrop-blur border-b border-[var(--ck-line)] px-4 py-3">
+      <header className="md:hidden fixed top-0 inset-x-0 z-40 bg-white/95 backdrop-blur border-b border-[var(--ck-line)] px-3 py-2">
         <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-3 min-w-0">
+          <div className="flex items-center gap-2 min-w-0">
             <button
               type="button"
               className="h-9 w-9 inline-flex items-center justify-center rounded-md border border-[var(--ck-line)] text-[var(--ck-muted)]"
@@ -145,11 +145,13 @@ export default function Layout() {
             >
               <Menu size={18} />
             </button>
-            <Logo />
+            <div className="min-w-0">
+              <Logo withText={false} />
+            </div>
           </div>
-          <div className="flex items-center gap-3 min-w-0">
+          <div className="flex items-center gap-2 shrink-0">
             <div className="text-right min-w-0">
-              <div className="text-xs font-semibold truncate max-w-[130px]" data-testid="current-user-name-mobile">{user?.name}</div>
+              <div className="text-xs font-semibold truncate max-w-[150px]" data-testid="current-user-name-mobile">{user?.name}</div>
               <div className="text-[10px] text-[var(--ck-muted)] capitalize truncate">{formatRoles(user)}</div>
             </div>
             <button

@@ -19,7 +19,7 @@ const pickForm = (s) => ({
   parent_email: s.parent_email || "", address: s.address || "",
   level_id: s.level_id || "", batch_id: s.batch_id || "",
   payment_plan: s.payment_plan || "monthly", concession_pct: s.concession_pct ?? 0,
-  subscription_start: s.subscription_start || "", subscription_end: s.subscription_end || "",
+  subscription_start: s.subscription_start || "", subscription_end: s.subscription_end || "", subscription_pause_until: s.subscription_pause_until || "",
   referred_by: s.referred_by || "", status: s.status || "active", photo_url: s.photo_url || "",
 });
 
@@ -232,6 +232,7 @@ export default function StudentDetail() {
             </div>
             <span className={`ck-pill ${
               subscription?.status === "active" ? "ck-pill-green" :
+              subscription?.status === "paused" ? "ck-pill-orange" :
               subscription?.status === "expiring_soon" ? "ck-pill-orange" :
               subscription?.status === "expired" ? "ck-pill-red" : "ck-pill-black"
             }`}>{subscription?.status || "none"}</span>
@@ -244,6 +245,10 @@ export default function StudentDetail() {
             <div>
               <div className="text-[var(--ck-muted)] text-xs">Renew by</div>
               <div className="font-medium">{subscription?.end || "—"}</div>
+            </div>
+            <div>
+              <div className="text-[var(--ck-muted)] text-xs">Pause until</div>
+              <div className="font-medium">{subscription?.pause_until || s.subscription_pause_until || "—"}</div>
             </div>
           </div>
           {subscription?.days_remaining != null && (
@@ -396,6 +401,9 @@ export default function StudentDetail() {
               </DField>
               <DField label="Validity End">
                 <Input type="date" value={form.subscription_end || ""} onChange={(e)=>setForm({...form, subscription_end:e.target.value})} data-testid="sd-validity-end" />
+              </DField>
+              <DField label="Pause Until">
+                <Input type="date" value={form.subscription_pause_until || ""} onChange={(e)=>setForm({...form, subscription_pause_until:e.target.value})} data-testid="sd-pause-until" />
               </DField>
               <DField label="Level">
                 <Select value={form.level_id || "_none"} onValueChange={(v)=>setForm({...form, level_id: v === "_none" ? "" : v})}>

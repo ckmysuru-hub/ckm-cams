@@ -23,11 +23,12 @@ import { downloadCsv, parseCsv } from "@/lib/csv";
 import { SortableHead, applySort } from "@/components/SortableHead";
 import { usePagination } from "@/lib/usePagination";
 import Pagination from "@/components/Pagination";
+import TableActions, { TableActionItem } from "@/components/TableActions";
 
 const empty = {
   full_name: "", dob: "", gender: "male", parent_name: "", parent_whatsapp: "",
   parent_email: "", address: "", level_id: "", batch_id: "", payment_plan: "monthly", billing_type: "prepaid",
-  subscription_start: "", subscription_end: "", concession_pct: 0, referred_by: "", status: "active",
+  subscription_start: "", subscription_end: "", subscription_pause_until: "", concession_pct: 0, referred_by: "", status: "active",
   photo_url: "",
 };
 
@@ -37,7 +38,7 @@ const pickForm = (s) => ({
   parent_email: s.parent_email || "", address: s.address || "",
   level_id: s.level_id || "", batch_id: s.batch_id || "",
   payment_plan: s.payment_plan || "monthly", billing_type: s.billing_type || "prepaid", concession_pct: s.concession_pct ?? 0,
-  subscription_start: s.subscription_start || "", subscription_end: s.subscription_end || "",
+  subscription_start: s.subscription_start || "", subscription_end: s.subscription_end || "", subscription_pause_until: s.subscription_pause_until || "",
   referred_by: s.referred_by || "", status: s.status || "active",
   photo_url: s.photo_url || "",
 });
@@ -117,6 +118,29 @@ export default function Students() {
     } catch (ex) { toast.error(formatApiError(ex.response?.data?.detail)); }
   };
 
+  const updateStudent = async (student, patch, message) => {
+    try {
+      const payload = { ...pickForm(student), ...patch, concession_pct: Number(student.concession_pct || 0) };
+      if (!payload.parent_email) payload.parent_email = null;
+      await api.put(`/students/${student.id}`, payload);
+      toast.success(message);
+      load();
+    } catch (ex) {
+      toast.error(formatApiError(ex.response?.data?.detail) || "Student update failed");
+    }
+  };
+
+  const markDropped = (student) => {
+    if (!window.confirm(`Mark ${student.full_name} as dropped?`)) return;
+    updateStudent(student, { status: "dropped" }, "Student marked as dropped");
+  };
+
+  const pauseSubscription = (student) => {
+    const value = window.prompt("Pause subscription until (YYYY-MM-DD). Leave blank to clear pause.", student.subscription_pause_until || "");
+    if (value === null) return;
+    updateStudent(student, { subscription_pause_until: value.trim() }, value.trim() ? "Subscription pause saved" : "Subscription pause cleared");
+  };
+
   // Derived list: filter + sort
   const batchById = Object.fromEntries(batches.map((b) => [b.id, b.name]));
   const levelById = Object.fromEntries(levels.map((l) => [l.id, l.name]));
@@ -176,6 +200,7 @@ export default function Students() {
       status: s.status || "",
       subscription_start: s.subscription_start || "",
       subscription_end: s.subscription_end || "",
+      subscription_pause_until: s.subscription_pause_until || "",
       enrollment_date: s.enrollment_date || "",
     }));
     if (!rows.length) { toast.error("No students to export"); return; }
@@ -212,7 +237,7 @@ export default function Students() {
         full_name: "Sample Kid", dob: "2015-04-12", gender: "male",
         parent_name: "Parent", parent_whatsapp: "+919876543210", parent_email: "parent@example.com",
         address: "Mysuru", payment_plan: "monthly", billing_type: "prepaid", level_code: "BEG", batch_name: "Monday Evening",
-        concession_pct: "0", referred_by: "Friend", enrollment_date: "",
+        subscription_pause_until: "", concession_pct: "0", referred_by: "Friend", enrollment_date: "",
       }],
       "students-import-template.csv",
     );
@@ -319,6 +344,9 @@ export default function Students() {
                 <Field label="Validity End">
                   <Input type="date" data-testid="sf-validity-end" value={form.subscription_end || ""} onChange={(e)=>setForm({...form, subscription_end:e.target.value})} />
                 </Field>
+                <Field label="Pause Until">
+                  <Input type="date" data-testid="sf-pause-until" value={form.subscription_pause_until || ""} onChange={(e)=>setForm({...form, subscription_pause_until:e.target.value})} />
+                </Field>
                 <Field label="Address" full>
                   <Input data-testid="sf-address" value={form.address} onChange={(e)=>setForm({...form, address:e.target.value})} />
                 </Field>
@@ -366,6 +394,7 @@ export default function Students() {
           <SelectContent>
             <SelectItem value="all">All subscriptions</SelectItem>
             <SelectItem value="active">Active</SelectItem>
+            <SelectItem value="paused">Paused</SelectItem>
             <SelectItem value="expiring_soon">Expiring soon</SelectItem>
             <SelectItem value="expired">Expired</SelectItem>
             <SelectItem value="none">No subscription</SelectItem>
@@ -430,6 +459,7 @@ export default function Students() {
                   {s.subscription_end ? (
                     <span className={`ck-pill ${
                       s.subscription_status === "active" ? "ck-pill-green" :
+                      s.subscription_status === "paused" ? "ck-pill-orange" :
                       s.subscription_status === "expiring_soon" ? "ck-pill-orange" :
                       s.subscription_status === "expired" ? "ck-pill-red" : "ck-pill-black"
                     }`}>
@@ -443,17 +473,13 @@ export default function Students() {
                   <span className={`ck-pill ${s.status === "active" ? "ck-pill-green" : "ck-pill-black"}`}>{s.status}</span>
                 </td>
                 <td className="text-right pr-4">
-                  <div className="flex justify-end gap-1">
-                    <button className="att-btn flex items-center gap-1" onClick={() => startEdit(s)} data-testid={`student-edit-${s.id}`}>
-                      <Pencil size={12}/> Edit
-                    </button>
-                    <a className="att-btn flex items-center gap-1" href={pdfUrl(`/api/students/${s.id}/id-card.pdf`)} target="_blank" rel="noreferrer" data-testid={`student-id-card-${s.id}`}>
-                      <IdCard size={12}/> ID
-                    </a>
-                    <button className="att-btn flex items-center gap-1 hover:!border-red-500 hover:!text-red-600" onClick={() => del(s)} data-testid={`student-delete-${s.id}`}>
-                      <Trash2 size={12}/>
-                    </button>
-                  </div>
+                  <TableActions testId={`student-actions-${s.id}`}>
+                    <TableActionItem icon={Pencil} onSelect={() => startEdit(s)} data-testid={`student-edit-${s.id}`}>Edit</TableActionItem>
+                    <TableActionItem icon={IdCard} onSelect={() => window.open(pdfUrl(`/api/students/${s.id}/id-card.pdf`), "_blank", "noopener,noreferrer")} data-testid={`student-id-card-${s.id}`}>ID card</TableActionItem>
+                    <TableActionItem icon={Filter} onSelect={() => pauseSubscription(s)}>Pause subscription</TableActionItem>
+                    <TableActionItem icon={Trash2} onSelect={() => markDropped(s)}>Mark dropped</TableActionItem>
+                    <TableActionItem icon={Trash2} className="text-red-600 focus:text-red-700" onSelect={() => del(s)} data-testid={`student-delete-${s.id}`}>Delete</TableActionItem>
+                  </TableActions>
                 </td>
               </tr>
             ))}

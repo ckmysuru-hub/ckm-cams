@@ -281,6 +281,7 @@ class StudentIn(BaseModel):
     billing_type: Optional[str] = "prepaid"  # prepaid | postpaid
     subscription_start: Optional[str] = None
     subscription_end: Optional[str] = None
+    subscription_pause_until: Optional[str] = None
     concession_pct: Optional[float] = 0
     referred_by: Optional[str] = ""
     status: Optional[str] = "inactive"
@@ -1374,7 +1375,7 @@ async def create_student(payload: StudentIn, user: dict = Depends(require_role("
     if not doc.get("enrollment_date"):
         doc["enrollment_date"] = date.today().isoformat()
     validate_subscription_dates(doc.get("subscription_start"), doc.get("subscription_end"))
-    doc["subscription_status"] = _compute_sub_status(doc.get("subscription_end"))
+    doc["subscription_status"] = _compute_sub_status(doc.get("subscription_end"), doc.get("subscription_pause_until"))
     if doc.get("subscription_end"):
         doc["subscription_plan"] = doc.get("payment_plan") or "monthly"
     res = await db.students.insert_one(doc)
@@ -1424,8 +1425,10 @@ async def update_student(sid: str, payload: StudentIn, user: dict = Depends(requ
         doc["subscription_start"] = existing.get("subscription_start")
     if doc.get("subscription_end") is None:
         doc["subscription_end"] = existing.get("subscription_end")
+    if doc.get("subscription_pause_until") is None:
+        doc["subscription_pause_until"] = existing.get("subscription_pause_until")
     validate_subscription_dates(doc.get("subscription_start"), doc.get("subscription_end"))
-    doc["subscription_status"] = _compute_sub_status(doc.get("subscription_end"))
+    doc["subscription_status"] = _compute_sub_status(doc.get("subscription_end"), doc.get("subscription_pause_until"))
     if doc.get("subscription_end"):
         doc["subscription_plan"] = doc.get("payment_plan") or "monthly"
     await db.students.update_one({"_id": oid(sid)}, {"$set": doc})
@@ -3426,7 +3429,14 @@ async def _postpaid_attendance_count(student_id: str, period: str) -> int:
     })
     return theory_count + practice_count
 
-def _compute_sub_status(end_iso: Optional[str]) -> str:
+def _compute_sub_status(end_iso: Optional[str], pause_until_iso: Optional[str] = None) -> str:
+    if pause_until_iso:
+        try:
+            pause_until = datetime.fromisoformat(pause_until_iso).date()
+            if pause_until >= date.today():
+                return "paused"
+        except Exception:
+            pass
     if not end_iso:
         return "none"
     try:
@@ -3469,7 +3479,7 @@ async def _extend_subscription(student_id: str, plan: str, ref_date: Optional[da
         {"$set": {
             "subscription_start": sub_start,
             "subscription_end": new_end_iso,
-            "subscription_status": _compute_sub_status(new_end_iso),
+            "subscription_status": _compute_sub_status(new_end_iso, student.get("subscription_pause_until")),
             "subscription_plan": config["plan"],
         }},
     )
@@ -3581,7 +3591,8 @@ async def get_subscription(sid: str, user: dict = Depends(get_current_user)):
         "plan": s.get("subscription_plan") or config["plan"],
         "plan_label": config["label"],
         "plan_duration_days": config["days"],
-        "status": _compute_sub_status(end),
+        "status": _compute_sub_status(end, s.get("subscription_pause_until")),
+        "pause_until": s.get("subscription_pause_until"),
         "days_remaining": (datetime.fromisoformat(end).date() - date.today()).days if end else None,
     }
 
@@ -3608,7 +3619,7 @@ async def extend_subscription_endpoint(sid: str, payload: SubExtendIn,
             {"_id": oid(sid)},
             {"$set": {"subscription_start": sub_start,
                       "subscription_end": new_end_iso,
-                      "subscription_status": _compute_sub_status(new_end_iso),
+                      "subscription_status": _compute_sub_status(new_end_iso, s.get("subscription_pause_until")),
                       "subscription_plan": plan}},
         )
         return await get_subscription(sid, _)
@@ -3759,7 +3770,8 @@ async def portal_data(token: str):
             "billing_type": _student_billing_type(s),
             "subscription_start": s.get("subscription_start"),
             "subscription_end": s.get("subscription_end"),
-            "subscription_status": _compute_sub_status(s.get("subscription_end")),
+            "subscription_pause_until": s.get("subscription_pause_until"),
+            "subscription_status": _compute_sub_status(s.get("subscription_end"), s.get("subscription_pause_until")),
         },
         "academy": {
             "name": os.environ.get("ACADEMY_NAME"),
@@ -3854,6 +3866,9 @@ async def monthly_billing_run(payload: MonthlyRunIn, user: dict = Depends(requir
         sid_str = str(s["_id"])
         if sid_str in already_billed:
             skipped.append({"student_id": sid_str, "reason": "already_billed"})
+            continue
+        if _compute_sub_status(s.get("subscription_end"), s.get("subscription_pause_until")) == "paused":
+            skipped.append({"student_id": sid_str, "reason": "subscription_paused"})
             continue
         if not s.get("level_id"):
             skipped.append({"student_id": sid_str, "reason": "no_level"})
@@ -4090,7 +4105,7 @@ async def import_students(payload: StudentImportRow, user: dict = Depends(requir
     """Bulk import students. Expected fields per row:
     full_name, parent_name, parent_whatsapp, parent_email, dob, gender, address,
     payment_plan (monthly|quarterly|annual|custom), billing_type (prepaid|postpaid),
-    level_code, batch_name, enrollment_date.
+    subscription_pause_until, level_code, batch_name, enrollment_date.
     Missing optional fields default to empty/none."""
     levels = await db.levels.find().to_list(500)
     batches = await db.batches.find().to_list(500)
@@ -4127,6 +4142,7 @@ async def import_students(payload: StudentImportRow, user: dict = Depends(requir
                 "batch_id": batch_id,
                 "payment_plan": plan,
                 "billing_type": billing_type,
+                "subscription_pause_until": (row.get("subscription_pause_until") or "").strip() or None,
                 "concession_pct": float(row.get("concession_pct") or 0),
                 "referred_by": (row.get("referred_by") or "").strip(),
                 "status": "active",

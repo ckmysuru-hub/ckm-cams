@@ -5,6 +5,8 @@ import { useAuth } from '@/contexts/AuthContext';
 import { isDirector } from '@/lib/roles';
 import { toast } from 'sonner';
 import { Plus, Upload, Trash2, Printer, FileDown, Play, CheckCircle, ExternalLink, ChevronRight, Eye, Edit2, Settings, X, Shuffle } from 'lucide-react';
+import { downloadCsv } from '@/lib/csv';
+import TableActions, { TableActionItem } from '@/components/TableActions';
 
 const TABS = ['Players', 'Rounds', 'Standings', 'Audit', 'Exports'];
 
@@ -203,6 +205,26 @@ function PlayersTab({ tid, user, t }) {
     finally { e.target.value = ''; }
   };
 
+  const downloadTemplate = () => {
+    const category = t.sections?.[0] || 'Open';
+    downloadCsv([{
+      first_name: 'Sample',
+      last_name: 'Player',
+      fide_id: '12345678',
+      federation: 'IND',
+      title: '',
+      fide_rating: '1200',
+      dob: '2012-04-12',
+      gender: 'male',
+      club: 'Chess Klub Mysuru',
+      email: 'player@example.com',
+      phone: '+919876543210',
+      category,
+      section: category,
+      payment_status: 'unpaid',
+    }], 'tournament-players-import-template.csv');
+  };
+
   const removePlayer = async (id) => {
     if (!window.confirm('Remove this player?')) return;
     await api.delete(`/tournaments/${tid}/players/${id}`); load();
@@ -235,6 +257,10 @@ function PlayersTab({ tid, user, t }) {
               </button>
             )}
             <input ref={fileRef} type="file" accept=".csv" onChange={onImport} className="hidden" />
+            <button onClick={downloadTemplate} data-testid="players-template-btn"
+              className="text-sm border border-gray-300 px-3 py-2 rounded-sm hover:bg-gray-50 flex items-center gap-1.5">
+              <FileDown className="w-4 h-4" /> Template
+            </button>
             <button onClick={() => fileRef.current?.click()} data-testid="import-csv-btn"
               className="text-sm border border-gray-300 px-3 py-2 rounded-sm hover:bg-gray-50 flex items-center gap-1.5">
               <Upload className="w-4 h-4" /> Import CSV
@@ -273,9 +299,11 @@ function PlayersTab({ tid, user, t }) {
                 </td>
                 <td>{p.status}</td>
                 {canEdit && (
-                  <td className="whitespace-nowrap">
-                    <button onClick={() => setEditPlayer(p)} data-testid={`edit-player-${p.id}`} className="p-1 text-gray-400 hover:text-[#F57C00]" title="Edit"><Edit2 className="w-4 h-4" /></button>
-                    <button onClick={() => removePlayer(p.id)} data-testid={`delete-player-${p.id}`} className="p-1 text-gray-400 hover:text-red-600" title="Delete"><Trash2 className="w-4 h-4" /></button>
+                  <td className="text-right">
+                    <TableActions testId={`player-actions-${p.id}`}>
+                      <TableActionItem icon={Edit2} onSelect={() => setEditPlayer(p)} data-testid={`edit-player-${p.id}`}>Edit</TableActionItem>
+                      <TableActionItem icon={Trash2} className="text-red-600 focus:text-red-700" onSelect={() => removePlayer(p.id)} data-testid={`delete-player-${p.id}`}>Delete</TableActionItem>
+                    </TableActions>
                   </td>
                 )}
               </tr>

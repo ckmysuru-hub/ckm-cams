@@ -8,6 +8,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { RefreshCw, Search, MessageCircle, CheckCircle2, AlertTriangle, Send, Mail, Bell, Filter, Eye } from "lucide-react";
 import { toast } from "sonner";
+import TableActions, { TableActionItem } from "@/components/TableActions";
 
 const today = () => new Date().toISOString().slice(0, 10);
 const monthStart = () => `${new Date().toISOString().slice(0, 7)}-01`;
@@ -174,14 +175,9 @@ export default function WhatsAppMessages() {
                     </div>
                   </td>
                   <td className="text-right pr-4">
-                    <button
-                      type="button"
-                      onClick={()=>setSelected(m)}
-                      className="att-btn inline-flex items-center gap-1"
-                      data-testid={`notification-detail-${m.id || m.created_at}`}
-                    >
-                      <Eye size={12}/> View
-                    </button>
+                    <TableActions testId={`notification-actions-${m.id || m.created_at}`}>
+                      <TableActionItem icon={Eye} onSelect={()=>setSelected(m)} data-testid={`notification-detail-${m.id || m.created_at}`}>View details</TableActionItem>
+                    </TableActions>
                   </td>
                 </tr>
               ))}
