@@ -16,6 +16,7 @@ import secrets
 import re
 import hmac
 import hashlib
+import zipfile
 from datetime import datetime, timezone, timedelta, date
 from typing import List, Optional, Literal, Dict
 
@@ -1397,6 +1398,31 @@ async def create_student(payload: StudentIn, user: dict = Depends(require_role("
                             })
     return saved
 
+@api.get("/students/id-cards.zip")
+async def active_student_id_cards_zip(user: dict = Depends(get_current_user)):
+    students = await db.students.find({"status": "active"}).sort("student_code", 1).to_list(10000)
+    if not students:
+        raise HTTPException(404, "No active students found")
+
+    buf = io.BytesIO()
+    used_names = set()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for student in students:
+            base = _safe_filename(student.get("student_code") or student.get("full_name"), "student")
+            filename = f"{base}_id_card.pdf"
+            if filename in used_names:
+                filename = f"{base}_{str(student['_id'])}_id_card.pdf"
+            used_names.add(filename)
+            archive.writestr(filename, _build_student_id_card_pdf(student))
+    buf.seek(0)
+
+    filename = f"active-student-id-cards-{date.today().isoformat()}.zip"
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
 @api.get("/students/{sid}")
 async def get_student(sid: str, user: dict = Depends(get_current_user)):
     s = await db.students.find_one({"_id": oid(sid)})
@@ -1804,6 +1830,44 @@ async def _build_invoice_doc(payload: InvoiceIn, user: dict) -> dict:
     }
     return inv
 
+async def _with_manual_postpaid_line_item(payload: InvoiceIn) -> InvoiceIn:
+    student = await db.students.find_one({"_id": oid(payload.student_id)})
+    if not student or _student_billing_type(student) != "postpaid":
+        return payload
+
+    level = await _level_for_student(student)
+    if not level:
+        raise HTTPException(400, "Postpaid student needs a level before an invoice can be generated")
+    per_day_fee = float(level.get("per_day_fee") or 0)
+    if per_day_fee <= 0:
+        raise HTTPException(400, "Postpaid student's level needs a per day fee")
+    subscription_end = student.get("subscription_end")
+    if not subscription_end:
+        raise HTTPException(400, "Postpaid student needs a subscription end date")
+
+    attended_count = await _postpaid_attendance_after_subscription_end(payload.student_id, subscription_end)
+    postpaid_amount = round(attended_count * per_day_fee, 2)
+    description = (
+        f"{level['name']} - Postpaid classes after subscription end date "
+        f"{subscription_end} ({attended_count} x INR {per_day_fee:g})"
+    )
+    postpaid_item = InvoiceItem(
+        description=description,
+        amount=postpaid_amount,
+    )
+    extra_items = [
+        item for item in payload.items
+        if "postpaid" not in (item.description or "").lower()
+    ]
+    return InvoiceIn(
+        student_id=payload.student_id,
+        period=payload.period,
+        due_date=payload.due_date,
+        items=[postpaid_item, *extra_items],
+        discount=payload.discount,
+        notes=payload.notes,
+    )
+
 async def _send_invoice_created_notifications(inv: dict) -> None:
     link = await get_or_create_payment_link(inv)
     link_url = (link or {}).get("url", "")
@@ -1921,6 +1985,7 @@ async def list_invoices(student_id: Optional[str] = None, status: Optional[str] 
 
 @api.post("/invoices")
 async def create_invoice(payload: InvoiceIn, user: dict = Depends(require_role("finance", "ops_manager", "front_desk"))):
+    payload = await _with_manual_postpaid_line_item(payload)
     carry_items, carry_sources = await _carry_forward_pending_items(payload.student_id)
     if carry_items:
         payload = InvoiceIn(
@@ -1932,6 +1997,14 @@ async def create_invoice(payload: InvoiceIn, user: dict = Depends(require_role("
             notes=payload.notes,
         )
     inv = await _build_invoice_doc(payload, user)
+    student = await db.students.find_one({"_id": oid(payload.student_id)})
+    if student and _student_billing_type(student) == "postpaid":
+        postpaid_item = next((item for item in payload.items if "postpaid" in item.description.lower()), None)
+        inv["billing_type"] = "postpaid"
+        if postpaid_item:
+            match = re.search(r"\((\d+) x INR ([0-9.]+)\)", postpaid_item.description)
+            inv["postpaid_attendance_count"] = int(match.group(1)) if match else 0
+            inv["postpaid_per_day_fee"] = float(match.group(2)) if match else 0
     if carry_sources:
         inv["carried_forward_from"] = carry_sources
     res = await db.invoices.insert_one(inv)
@@ -3426,6 +3499,24 @@ async def _postpaid_attendance_count(student_id: str, period: str) -> int:
     practice_count = await db.checkins.count_documents({
         "student_id": student_id,
         "check_in_date": {"$gte": start_date, "$lte": end_date},
+    })
+    return theory_count + practice_count
+
+async def _postpaid_attendance_after_subscription_end(student_id: str, subscription_end: str) -> int:
+    try:
+        end_date = datetime.fromisoformat(subscription_end).date().isoformat()
+    except Exception:
+        raise HTTPException(400, "Postpaid student needs a valid subscription_end date")
+
+    billable_marks = ["P", "LT"]
+    theory_count = await db.attendance.count_documents({
+        "session_date": {"$gt": end_date},
+        "marked_via": {"$ne": "kiosk"},
+        f"marks.{student_id}": {"$in": billable_marks},
+    })
+    practice_count = await db.checkins.count_documents({
+        "student_id": student_id,
+        "check_in_date": {"$gt": end_date},
     })
     return theory_count + practice_count
 

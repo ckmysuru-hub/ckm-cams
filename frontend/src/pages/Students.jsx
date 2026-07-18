@@ -60,6 +60,7 @@ export default function Students() {
   const [pendingLevel, setPendingLevel] = useState(null);
   const [savingLevel, setSavingLevel] = useState(false);
   const [photoUploading, setPhotoUploading] = useState(false);
+  const [downloadingCards, setDownloadingCards] = useState(false);
 
   const load = () => api.get("/students", { params: q ? { q } : {} }).then((r) => setItems(r.data));
   useEffect(() => { load(); }, [q]);
@@ -206,6 +207,26 @@ export default function Students() {
     if (!rows.length) { toast.error("No students to export"); return; }
     downloadCsv(rows, `chessklub-students-${new Date().toISOString().slice(0,10)}.csv`);
     toast.success(`Exported ${rows.length} student${rows.length === 1 ? "" : "s"}`);
+  };
+
+  const downloadActiveIdCards = async () => {
+    setDownloadingCards(true);
+    try {
+      const { data } = await api.get("/students/id-cards.zip", { responseType: "blob" });
+      const url = URL.createObjectURL(data);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `active-student-id-cards-${new Date().toISOString().slice(0,10)}.zip`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      toast.success("ID cards downloaded");
+    } catch (ex) {
+      toast.error(formatApiError(ex.response?.data?.detail) || "Could not download ID cards");
+    } finally {
+      setDownloadingCards(false);
+    }
   };
 
   const onImport = async (e) => {
@@ -402,6 +423,9 @@ export default function Students() {
         </Select>
         <button onClick={exportCsv} className="ck-btn-ghost text-xs flex items-center gap-1" data-testid="export-csv">
           <Download size={12}/> Export
+        </button>
+        <button onClick={downloadActiveIdCards} disabled={downloadingCards} className="ck-btn-ghost text-xs flex items-center gap-1" data-testid="download-active-id-cards">
+          {downloadingCards ? <Loader2 size={12} className="animate-spin" /> : <IdCard size={12}/>} ID cards
         </button>
         <label className="ck-btn-ghost text-xs flex items-center gap-1 cursor-pointer" data-testid="import-csv">
           <Upload size={12}/> {importing ? "Importing…" : "Import"}

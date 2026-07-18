@@ -83,14 +83,14 @@ export default function Billing() {
     if (s.level_id) {
       const lv = levels.find((l)=>l.id===s.level_id);
       if (lv) {
-        const amt = s.billing_type === "postpaid" ? lv.per_day_fee
+        const amt = s.billing_type === "postpaid" ? 0
                   : s.payment_plan === "custom"    ? lv.custom_fee
                   : s.payment_plan === "quarterly" ? lv.quarterly_fee
                   : s.payment_plan === "annual"    ? lv.annual_fee
                   : lv.monthly_fee;
         newItems.push({
           description: s.billing_type === "postpaid"
-            ? `${lv.name} - Postpaid class fee (per day)`
+            ? `${lv.name} - Postpaid classes after subscription end date (calculated on save)`
             : `${lv.name} - ${planLabel(s, lv)} fee`,
           amount: Number(amt || 0),
         });
