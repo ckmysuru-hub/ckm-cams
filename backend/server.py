@@ -2281,7 +2281,6 @@ def _build_student_id_card_pdf(student: dict) -> bytes:
     renderPDF.draw(drawing, c, width - 25 * mm, 14 * mm)
     c.setFillColor(BLACK)
     c.setFont("Helvetica-Bold", 5.5)
-    c.drawCentredString(width - 15 * mm, 35.5 * mm, "SCAN AT KIOSK")
 
     c.setFillColor(colors.HexColor("#f7f7f7"))
     c.rect(0, 0, width, 12 * mm, fill=1, stroke=0)
