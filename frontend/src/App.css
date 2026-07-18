@@ -11,6 +11,7 @@
 }
 
 html, body, #root { background: var(--ck-cream); }
+html, body { overflow-x: hidden; }
 
 body {
   font-family: 'Manrope', 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
@@ -138,17 +139,97 @@ body {
   }
 
   .ck-card-elevated:has(table) {
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
+    overflow: visible;
   }
 
   .ck-table {
-    min-width: 720px;
+    min-width: 0;
+    width: 100%;
   }
 
   .ck-table th,
   .ck-table td {
-    white-space: nowrap;
+    white-space: normal;
+  }
+
+  .ck-table thead {
+    display: none;
+  }
+
+  .ck-table,
+  .ck-table tbody,
+  .ck-table tr,
+  .ck-table td {
+    display: block;
+  }
+
+  .ck-table tbody {
+    display: grid;
+    gap: 12px;
+  }
+
+  .ck-table tr {
+    border: 1px solid var(--ck-line);
+    border-radius: 12px;
+    background: #fff;
+    overflow: hidden;
+  }
+
+  .ck-table tr:hover td {
+    background: transparent;
+  }
+
+  .ck-table td {
+    min-height: 42px;
+    padding: 9px 12px !important;
+    border-top: 1px solid #f0eee9;
+    text-align: left !important;
+  }
+
+  .ck-table td:first-child {
+    border-top: 0;
+  }
+
+  .ck-table td:not([colspan]) {
+    display: grid;
+    grid-template-columns: minmax(92px, 38%) minmax(0, 1fr);
+    gap: 12px;
+    align-items: start;
+  }
+
+  .ck-table td:not([colspan])::before {
+    content: attr(data-label);
+    color: var(--ck-muted);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .04em;
+    line-height: 1.3;
+    text-transform: uppercase;
+  }
+
+  .ck-table td[colspan] {
+    text-align: center !important;
+  }
+
+  .ck-table td > .flex.justify-end,
+  .ck-table td > div.flex.justify-end,
+  .ck-table td .justify-end {
+    justify-content: flex-start !important;
+  }
+
+  .ck-table .ck-pill {
+    max-width: 100%;
+    white-space: normal;
+  }
+
+  .ck-table [role="combobox"] {
+    width: 100% !important;
+  }
+
+  .ck-table .truncate {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
   }
 
   .ck-btn-primary,
@@ -176,13 +257,13 @@ body {
   }
 
   [data-testid="invoice-form"] .grid-cols-12 {
-    grid-template-columns: minmax(0, 1fr) 96px 40px !important;
+    grid-template-columns: minmax(0, 1fr) !important;
   }
 
   [data-testid="invoice-form"] .col-span-8,
   [data-testid="invoice-form"] .col-span-3,
   [data-testid="invoice-form"] .col-span-1 {
-    grid-column: auto !important;
+    grid-column: 1 / -1 !important;
   }
 
   [data-testid$="-toolbar"] {
@@ -199,11 +280,45 @@ body {
     width: 100% !important;
   }
 
-  /* Style the iframe itself */
-.iframe-container iframe {
-    width: 100%;
-    height: 100%;
-    border: none;
-    display: block;
+  form .flex.justify-end,
+  form .flex.justify-between {
+    flex-wrap: wrap;
+  }
+
+  form .flex.justify-end > button,
+  form .flex.justify-between > button {
+    flex: 1 1 140px;
+  }
 }
+
+.iframe-container iframe {
+  width: 100%;
+  height: 100%;
+  border: none;
+  display: block;
+}
+
+@media (min-width: 768px) and (max-width: 1023px) {
+  .ck-card-elevated:has(table) {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .ck-table {
+    min-width: 760px;
+  }
+
+  .ck-table th,
+  .ck-table td {
+    padding-top: 10px;
+    padding-bottom: 10px;
+  }
+
+  [data-testid$="-toolbar"] {
+    align-items: stretch !important;
+  }
+
+  [data-testid$="-toolbar"] > * {
+    min-width: 160px;
+  }
 }

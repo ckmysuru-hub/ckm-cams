@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
 import { Logo } from "@/components/Brand";
 import { isDirector, formatRoles } from "@/lib/roles";
@@ -29,6 +29,7 @@ const NAV = [
 export default function Layout() {
   const { user, logout } = useAuth();
   const nav = useNavigate();
+  const location = useLocation();
   const visibleNav = NAV.filter((item) => !item.directorOnly || isDirector(user));
   const [mobileOpen, setMobileOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(() => {
@@ -40,6 +41,32 @@ export default function Layout() {
     try { window.localStorage.setItem("ck-sidebar-collapsed", collapsed ? "1" : "0"); }
     catch { /* ignore storage failures */ }
   }, [collapsed]);
+
+  useEffect(() => {
+    const annotateTables = () => {
+      document.querySelectorAll(".ck-table").forEach((table) => {
+        const headers = Array.from(table.querySelectorAll("thead th")).map((th, index) => {
+          const label = (th.textContent || "").replace(/\s+/g, " ").trim();
+          return label || `Column ${index + 1}`;
+        });
+        table.querySelectorAll("tbody tr").forEach((row) => {
+          Array.from(row.children).forEach((cell, index) => {
+            if (cell.tagName !== "TD") return;
+            if (cell.getAttribute("colspan")) {
+              cell.removeAttribute("data-label");
+            } else {
+              cell.setAttribute("data-label", headers[index] || "");
+            }
+          });
+        });
+      });
+    };
+
+    annotateTables();
+    const observer = new MutationObserver(annotateTables);
+    observer.observe(document.body, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, [location.pathname]);
 
   const onLogout = async () => {
     await logout();
