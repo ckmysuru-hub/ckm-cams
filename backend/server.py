@@ -3579,6 +3579,20 @@ async def _extend_subscription(student_id: str, plan: str, ref_date: Optional[da
 class KioskAction(BaseModel):
     code: str  # student_code like CKM-10001, or just the numeric suffix
 
+@api.get("/kiosk/active-students")
+async def kiosk_active_students():
+    students = await db.students.find({"status": "active"}).sort("full_name", 1).to_list(10000)
+    return [
+        {
+            "id": str(student["_id"]),
+            "full_name": student.get("full_name", ""),
+            "student_code": student.get("student_code", ""),
+            "batch_id": student.get("batch_id"),
+            "photo_url": student.get("photo_url"),
+        }
+        for student in students
+    ]
+
 def normalize_kiosk_code(code: str) -> str:
     raw = (code or "").strip().upper()
     if raw.startswith("CKM-CHECKIN:"):
