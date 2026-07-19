@@ -13,6 +13,7 @@ import {
   QrCode,
   Search,
   SwitchCamera,
+  Trash2,
   UserCheck,
   Users,
 } from "lucide-react";
@@ -160,6 +161,7 @@ export default function Kiosk() {
   const [faceLoading, setFaceLoading] = useState(false);
   const [faceMatches, setFaceMatches] = useState([]);
   const [faceFacingMode, setFaceFacingMode] = useState(() => (isMobileDevice() ? "environment" : "user"));
+  const [deletingCheckinId, setDeletingCheckinId] = useState(null);
   const qrVideoRef = useRef(null);
   const faceVideoRef = useRef(null);
   const qrStreamRef = useRef(null);
@@ -428,6 +430,22 @@ export default function Kiosk() {
 
   const submitStudent = (student) => submitValue(student?.student_code || "");
 
+  const deleteCheckin = async (checkin) => {
+    if (!window.confirm(`Delete ${checkin.student_name}'s check-in for today?`)) return;
+    setDeletingCheckinId(checkin.id);
+    setFeedback(null);
+    try {
+      await api.delete(`/kiosk/checkins/${checkin.id}`);
+      setFeedback({ ok: true, status: "deleted", student_name: checkin.student_name });
+      setTimeout(() => setFeedback(null), 4000);
+      refreshRecent();
+    } catch (ex) {
+      setFeedback({ ok: false, error: formatApiError(ex.response?.data?.detail) || "Could not delete check-in" });
+    } finally {
+      setDeletingCheckinId(null);
+    }
+  };
+
   return (
     <div className="min-h-screen flex flex-col" data-testid="kiosk-page" style={{ background: "var(--ck-cream)" }}>
       <header className="px-4 sm:px-8 py-4 sm:py-5 border-b border-[var(--ck-line)] bg-white flex items-center justify-between gap-3">
@@ -624,6 +642,7 @@ export default function Kiosk() {
                       {feedback.status === "already_in" && `Already checked in at ${fmtTime(feedback.check_in)}`}
                       {feedback.status === "already_done" && "Already done for today"}
                       {feedback.status === "already_out" && "Already checked out"}
+                      {feedback.status === "deleted" && "Check-in deleted"}
                     </div>
                   </>
                 ) : (
@@ -642,14 +661,27 @@ export default function Kiosk() {
           <div className="ck-display text-xl font-semibold mb-4">{recent.length} check-in{recent.length === 1 ? "" : "s"}</div>
           <div className="space-y-2">
             {recent.map((c) => (
-              <div key={c.id} className="ck-card p-3 flex items-center justify-between">
-                <div>
+              <div key={c.id} className="ck-card p-3 flex items-center justify-between gap-3">
+                <div className="min-w-0">
                   <div className="text-sm font-medium">{c.student_name}</div>
                   <div className="text-[10px] font-mono text-[var(--ck-muted)]">{c.student_code}</div>
                 </div>
-                <div className="text-right">
-                  <div className="text-xs flex items-center gap-1 text-[var(--ck-muted)]"><Clock size={11} /> {fmtTime(c.check_in)}</div>
-                  {c.check_out && <div className="text-[10px] text-green-700">Out · {fmtTime(c.check_out)}</div>}
+                <div className="flex items-center gap-2 shrink-0">
+                  <div className="text-right">
+                    <div className="text-xs flex items-center gap-1 text-[var(--ck-muted)]"><Clock size={11} /> {fmtTime(c.check_in)}</div>
+                    {c.check_out && <div className="text-[10px] text-green-700">Out · {fmtTime(c.check_out)}</div>}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => deleteCheckin(c)}
+                    disabled={deletingCheckinId === c.id}
+                    className="h-8 w-8 rounded-md border border-[var(--ck-line)] bg-white text-[var(--ck-muted)] flex items-center justify-center hover:border-red-400 hover:text-red-600 disabled:opacity-50"
+                    title="Delete check-in"
+                    aria-label={`Delete check-in for ${c.student_name}`}
+                    data-testid={`kiosk-delete-checkin-${c.id}`}
+                  >
+                    {deletingCheckinId === c.id ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+                  </button>
                 </div>
               </div>
             ))}

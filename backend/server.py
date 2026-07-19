@@ -3677,6 +3677,13 @@ async def kiosk_recent(user: dict = Depends(get_current_user)):
     items = await db.checkins.find({"check_in_date": today_iso}).sort("check_in", -1).to_list(100)
     return [serialize_doc(x) for x in items]
 
+@api.delete("/kiosk/checkins/{cid}")
+async def delete_kiosk_checkin(cid: str, _: dict = Depends(require_role("ops_manager", "front_desk", "coach"))):
+    res = await db.checkins.delete_one({"_id": oid(cid)})
+    if res.deleted_count == 0:
+        raise HTTPException(404, "Check-in not found")
+    return {"ok": True}
+
 # ---------------------------- Subscription endpoints ----------------------------
 class SubExtendIn(BaseModel):
     plan: Optional[str] = None  # uses student's plan if not provided
