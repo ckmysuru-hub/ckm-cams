@@ -12,13 +12,16 @@ import {
   LogOut,
   QrCode,
   Search,
+  SwitchCamera,
   UserCheck,
   Users,
 } from "lucide-react";
 
-const FACE_HASH_SIZE = 16;
-const FACE_MATCH_MAX_DISTANCE = 86;
-const FACE_AUTO_MATCHES = 2;
+const FACE_SAMPLE_SIZE = 32;
+const FACE_AUTO_SCORE = 94;
+const FACE_CONFIRM_SCORE = 86;
+const FACE_MIN_MARGIN = 8;
+const FACE_AUTO_MATCHES = 4;
 
 const fmtTime = (iso) => {
   if (!iso) return "—";
@@ -44,14 +47,20 @@ const loadImage = (src) =>
     img.src = src;
   });
 
+const isMobileDevice = () => {
+  if (typeof navigator === "undefined" || typeof window === "undefined") return false;
+  const ua = navigator.userAgent || "";
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(ua) || (window.matchMedia?.("(pointer: coarse)")?.matches && window.innerWidth < 900);
+};
+
 const cropForFace = async (source) => {
   const width = source.videoWidth || source.naturalWidth || source.width;
   const height = source.videoHeight || source.naturalHeight || source.height;
-  if (!width || !height) return { sx: 0, sy: 0, sw: 1, sh: 1 };
+  if (!width || !height) return null;
 
   if ("FaceDetector" in window) {
     try {
-      const detector = new window.FaceDetector({ fastMode: true, maxDetectedFaces: 1 });
+      const detector = new window.FaceDetector({ fastMode: false, maxDetectedFaces: 1 });
       const faces = await detector.detect(source);
       const box = faces?.[0]?.boundingBox;
       if (box?.width && box?.height) {
@@ -60,31 +69,54 @@ const cropForFace = async (source) => {
         const sy = Math.max(0, box.y - pad);
         const ex = Math.min(width, box.x + box.width + pad);
         const ey = Math.min(height, box.y + box.height + pad);
-        return { sx, sy, sw: ex - sx, sh: ey - sy };
+        return { sx, sy, sw: ex - sx, sh: ey - sy, detected: true };
       }
+      return null;
     } catch (_) {
       // Fall through to centered crop when the browser cannot detect this frame.
     }
   }
 
   const side = Math.min(width, height);
-  return { sx: (width - side) / 2, sy: (height - side) / 2, sw: side, sh: side };
+  return { sx: (width - side) / 2, sy: (height - side) / 2, sw: side, sh: side, detected: false };
 };
 
-const visualHash = async (source) => {
+const descriptorFromSource = async (source) => {
   const crop = await cropForFace(source);
+  if (!crop) return null;
   const canvas = document.createElement("canvas");
-  canvas.width = FACE_HASH_SIZE;
-  canvas.height = FACE_HASH_SIZE;
+  canvas.width = FACE_SAMPLE_SIZE;
+  canvas.height = FACE_SAMPLE_SIZE;
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  ctx.drawImage(source, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, FACE_HASH_SIZE, FACE_HASH_SIZE);
-  const data = ctx.getImageData(0, 0, FACE_HASH_SIZE, FACE_HASH_SIZE).data;
+  ctx.filter = "grayscale(1) contrast(1.18)";
+  ctx.drawImage(source, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, FACE_SAMPLE_SIZE, FACE_SAMPLE_SIZE);
+  const data = ctx.getImageData(0, 0, FACE_SAMPLE_SIZE, FACE_SAMPLE_SIZE).data;
   const gray = [];
+  const histogram = new Array(16).fill(0);
   for (let i = 0; i < data.length; i += 4) {
-    gray.push(data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114);
+    const value = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+    gray.push(value);
+    histogram[Math.min(15, Math.floor(value / 16))] += 1;
   }
-  const avg = gray.reduce((sum, value) => sum + value, 0) / gray.length;
-  return gray.map((value) => (value >= avg ? 1 : 0));
+  const mean = gray.reduce((sum, value) => sum + value, 0) / gray.length;
+  const variance = gray.reduce((sum, value) => sum + ((value - mean) ** 2), 0) / gray.length;
+  const std = Math.sqrt(variance) || 1;
+  const normalized = gray.map((value) => (value - mean) / std);
+  const averageHash = gray.map((value) => (value >= mean ? 1 : 0));
+  const differenceHash = [];
+  for (let y = 0; y < FACE_SAMPLE_SIZE; y += 1) {
+    for (let x = 0; x < FACE_SAMPLE_SIZE - 1; x += 1) {
+      differenceHash.push(gray[y * FACE_SAMPLE_SIZE + x] > gray[y * FACE_SAMPLE_SIZE + x + 1] ? 1 : 0);
+    }
+  }
+  const histogramTotal = histogram.reduce((sum, value) => sum + value, 0) || 1;
+  return {
+    averageHash,
+    differenceHash,
+    normalized,
+    histogram: histogram.map((value) => value / histogramTotal),
+    faceDetected: crop.detected,
+  };
 };
 
 const hashDistance = (a, b) => {
@@ -96,8 +128,22 @@ const hashDistance = (a, b) => {
   return distance;
 };
 
+const descriptorScore = (a, b) => {
+  if (!a || !b) return 0;
+  const averageDistance = hashDistance(a.averageHash, b.averageHash) / a.averageHash.length;
+  const differenceDistance = hashDistance(a.differenceHash, b.differenceHash) / a.differenceHash.length;
+  const histogramOverlap = a.histogram.reduce((sum, value, index) => sum + Math.min(value, b.histogram[index] || 0), 0);
+  const vectorDistance = a.normalized.reduce((sum, value, index) => sum + Math.abs(value - b.normalized[index]), 0) / a.normalized.length;
+  const vectorScore = Math.max(0, 1 - vectorDistance / 2.8);
+  const score =
+    (1 - averageDistance) * 28 +
+    (1 - differenceDistance) * 32 +
+    histogramOverlap * 14 +
+    vectorScore * 26;
+  return Math.max(0, Math.min(100, Math.round(score)));
+};
+
 export default function Kiosk() {
-  const [code, setCode] = useState("");
   const [mode, setMode] = useState("in"); // in | out
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState(null);
@@ -113,20 +159,21 @@ export default function Kiosk() {
   const [faceHashes, setFaceHashes] = useState([]);
   const [faceLoading, setFaceLoading] = useState(false);
   const [faceMatches, setFaceMatches] = useState([]);
-  const inputRef = useRef(null);
+  const [faceFacingMode, setFaceFacingMode] = useState(() => (isMobileDevice() ? "environment" : "user"));
   const qrVideoRef = useRef(null);
   const faceVideoRef = useRef(null);
   const qrStreamRef = useRef(null);
   const faceStreamRef = useRef(null);
   const scanBusyRef = useRef(false);
   const faceBusyRef = useRef(false);
+  const busyRef = useRef(false);
+  const modeRef = useRef(mode);
   const faceCandidateRef = useRef({ id: null, count: 0 });
 
   const refreshRecent = () => api.get("/kiosk/recent").then((r) => setRecent(r.data)).catch(() => {});
   const refreshStudents = () => api.get("/kiosk/active-students").then((r) => setStudents(r.data)).catch(() => setStudents([]));
 
   useEffect(() => {
-    inputRef.current?.focus();
     const t = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(t);
   }, []);
@@ -134,6 +181,14 @@ export default function Kiosk() {
   useEffect(() => {
     refreshStudents();
   }, []);
+
+  useEffect(() => {
+    busyRef.current = busy;
+  }, [busy]);
+
+  useEffect(() => {
+    modeRef.current = mode;
+  }, [mode]);
 
   // Recent list is auth-only; safely ignore if anonymous.
   useEffect(() => {
@@ -164,7 +219,8 @@ export default function Kiosk() {
         if (cancelled) return;
         try {
           const image = await loadImage(assetUrl(student.photo_url));
-          prepared.push({ student, hash: await visualHash(image) });
+          const descriptor = await descriptorFromSource(image);
+          if (descriptor) prepared.push({ student, descriptor });
         } catch (_) {
           // Skip photos the browser cannot load or read.
         }
@@ -196,7 +252,7 @@ export default function Kiosk() {
     const start = async () => {
       setScanError("");
       if (!("BarcodeDetector" in window)) {
-        setScanError("QR camera scan is not supported on this browser. Use the student list or code below.");
+        setScanError("QR camera scan is not supported on this browser. Use the student list instead.");
         setScanActive(false);
         return;
       }
@@ -226,7 +282,7 @@ export default function Kiosk() {
         };
         requestAnimationFrame(tick);
       } catch {
-        setScanError("Camera permission was denied or no camera is available. Use the student list or code below.");
+        setScanError("Camera permission was denied or no camera is available. Use the student list instead.");
         setScanActive(false);
       }
     };
@@ -260,7 +316,13 @@ export default function Kiosk() {
         return;
       }
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } });
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: faceFacingMode },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          },
+        });
         faceStreamRef.current = stream;
         if (faceVideoRef.current) {
           faceVideoRef.current.srcObject = stream;
@@ -268,33 +330,46 @@ export default function Kiosk() {
         }
         setFaceStatus("Looking for a matching active student...");
         const tick = async () => {
-          if (cancelled || !faceVideoRef.current || faceBusyRef.current || busy) return;
+          if (cancelled || !faceVideoRef.current) return;
+          if (faceBusyRef.current || busyRef.current) {
+            window.setTimeout(tick, 900);
+            return;
+          }
           faceBusyRef.current = true;
           try {
-            const liveHash = await visualHash(faceVideoRef.current);
-            const ranked = faceHashes
-              .map((item) => {
-                const distance = hashDistance(liveHash, item.hash);
-                const confidence = Math.max(0, Math.round((1 - distance / (FACE_HASH_SIZE * FACE_HASH_SIZE)) * 100));
-                return { ...item, distance, confidence };
-              })
-              .sort((a, b) => a.distance - b.distance)
-              .slice(0, 3);
-            setFaceMatches(ranked);
-            const best = ranked[0];
-            if (best && best.distance <= FACE_MATCH_MAX_DISTANCE) {
-              const current = faceCandidateRef.current;
-              const count = current.id === best.student.id ? current.count + 1 : 1;
-              faceCandidateRef.current = { id: best.student.id, count };
-              setFaceStatus(`Recognized ${best.student.full_name} (${best.confidence}% match).`);
-              if (count >= FACE_AUTO_MATCHES) {
-                faceCandidateRef.current = { id: null, count: 0 };
-                await submitStudent(best.student);
-                setFaceActive(false);
-              }
-            } else {
+            const liveDescriptor = await descriptorFromSource(faceVideoRef.current);
+            if (!liveDescriptor) {
               faceCandidateRef.current = { id: null, count: 0 };
-              setFaceStatus("No confident match yet. Face the camera with good light.");
+              setFaceMatches([]);
+              setFaceStatus("No face detected. Center one face in the camera.");
+            } else {
+              const ranked = faceHashes
+                .map((item) => {
+                  const score = descriptorScore(liveDescriptor, item.descriptor);
+                  return { ...item, score };
+                })
+                .sort((a, b) => b.score - a.score)
+                .slice(0, 3);
+              const best = ranked[0];
+              const second = ranked[1];
+              const margin = best ? best.score - (second?.score || 0) : 0;
+              const confident = best && best.score >= FACE_CONFIRM_SCORE && margin >= FACE_MIN_MARGIN;
+              setFaceMatches(confident ? ranked : []);
+              if (confident) {
+                const current = faceCandidateRef.current;
+                const count = current.id === best.student.id ? current.count + 1 : 1;
+                faceCandidateRef.current = { id: best.student.id, count };
+                setFaceStatus(`Possible match: ${best.student.full_name} (${best.score}% confidence). Confirm before ${modeRef.current === "in" ? "check-in" : "check-out"} if it looks right.`);
+                if (best.score >= FACE_AUTO_SCORE && count >= FACE_AUTO_MATCHES) {
+                  faceCandidateRef.current = { id: null, count: 0 };
+                  await submitStudent(best.student);
+                  setFaceActive(false);
+                }
+              } else {
+                faceCandidateRef.current = { id: null, count: 0 };
+                const hint = best ? `Best candidate is only ${best.score}% with a ${margin}% gap.` : "No candidate yet.";
+                setFaceStatus(`${hint} Keep the face centered with good light.`);
+              }
             }
           } catch (_) {
             setFaceStatus("Unable to read this camera frame. Adjust position and try again.");
@@ -317,7 +392,7 @@ export default function Kiosk() {
       faceBusyRef.current = false;
       faceCandidateRef.current = { id: null, count: 0 };
     };
-  }, [faceActive, faceHashes, busy]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [faceActive, faceFacingMode, faceHashes]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const visibleStudents = useMemo(() => {
     const q = studentQuery.trim().toLowerCase();
@@ -336,11 +411,11 @@ export default function Kiosk() {
     setBusy(true);
     setFeedback(null);
     try {
-      const path = mode === "in" ? "/kiosk/checkin" : "/kiosk/checkout";
+      const actionMode = modeRef.current;
+      const path = actionMode === "in" ? "/kiosk/checkin" : "/kiosk/checkout";
       const payloadCode = raw.includes("CKM-CHECKIN:") || raw.includes("CKM-") ? raw : `CKM-${codeNumber}`;
       const { data } = await api.post(path, { code: payloadCode });
-      setFeedback({ ok: true, ...data, mode });
-      setCode("");
+      setFeedback({ ok: true, ...data, mode: actionMode });
       setTimeout(() => setFeedback(null), 5000);
       refreshRecent();
       refreshStudents();
@@ -348,22 +423,10 @@ export default function Kiosk() {
       setFeedback({ ok: false, error: formatApiError(ex.response?.data?.detail) || "Could not process" });
     } finally {
       setBusy(false);
-      inputRef.current?.focus();
     }
   };
 
   const submitStudent = (student) => submitValue(student?.student_code || "");
-
-  const submit = async (e) => {
-    e?.preventDefault?.();
-    await submitValue(code);
-  };
-
-  const pad = (k) => {
-    if (k === "back") setCode((c) => c.slice(0, -1));
-    else if (k === "clear") setCode("");
-    else setCode((c) => (c + k).replace(/\D/g, ""));
-  };
 
   return (
     <div className="min-h-screen flex flex-col" data-testid="kiosk-page" style={{ background: "var(--ck-cream)" }}>
@@ -427,9 +490,19 @@ export default function Kiosk() {
                   </button>
                 )}
                 {faceActive && (
-                  <button type="button" onClick={() => setFaceActive(false)} className="mt-3 w-full ck-btn-ghost text-sm">
-                    Stop face check-in
-                  </button>
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    <button type="button" onClick={() => setFaceActive(false)} className="ck-btn-ghost text-sm">
+                      Stop face check-in
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setFaceFacingMode((value) => (value === "user" ? "environment" : "user"))}
+                      className="ck-btn-ghost text-sm flex items-center justify-center gap-2"
+                    >
+                      <SwitchCamera size={14} />
+                      {faceFacingMode === "user" ? "Use back camera" : "Use front camera"}
+                    </button>
+                  </div>
                 )}
                 <div className="mt-3 text-xs text-[var(--ck-muted)] flex items-start gap-2">
                   <ImageIcon size={14} className="mt-0.5 shrink-0" />
@@ -441,15 +514,18 @@ export default function Kiosk() {
                       <button
                         key={match.student.id}
                         type="button"
-                        onClick={() => submitStudent(match.student)}
+                        onClick={() => {
+                          setFaceActive(false);
+                          submitStudent(match.student);
+                        }}
                         disabled={busy}
                         className="text-left rounded-lg border border-[var(--ck-line)] bg-white p-2 hover:border-[var(--ck-orange)] disabled:opacity-50"
                       >
                         <div className="flex items-center justify-between gap-2">
                           <span className="text-sm font-semibold">{match.student.full_name}</span>
-                          <span className="text-xs text-[var(--ck-muted)]">{match.confidence}%</span>
+                          <span className="text-xs text-[var(--ck-muted)]">{match.score}%</span>
                         </div>
-                        <div className="text-[10px] font-mono text-[var(--ck-muted)]">{match.student.student_code}</div>
+                        <div className="text-[10px] font-mono text-[var(--ck-muted)]">Tap to confirm {mode === "in" ? "check-in" : "check-out"}</div>
                       </button>
                     ))}
                   </div>
@@ -506,8 +582,8 @@ export default function Kiosk() {
               </section>
             </div>
 
-            <div className="grid lg:grid-cols-2 gap-4 mt-4 items-start">
-              <section className="ck-card-elevated p-4">
+            <div className="grid gap-4 mt-4 items-start">
+              <section className="ck-card-elevated p-4 max-w-xl mx-auto w-full">
                 <div className="flex items-center justify-between gap-3 mb-3">
                   <div>
                     <div className="text-xs uppercase tracking-wider font-semibold text-[var(--ck-muted)]">QR check-in</div>
@@ -529,52 +605,6 @@ export default function Kiosk() {
                 )}
                 {scanError && <div className="text-xs text-red-700 mt-3">{scanError}</div>}
               </section>
-
-              <form onSubmit={submit} className="ck-card-elevated p-4">
-                <label className="text-xs font-semibold uppercase tracking-wider text-[var(--ck-muted)] mb-2 block text-center">
-                  Enter student code
-                </label>
-                <div className="flex rounded-2xl border-2 border-[var(--ck-line)] bg-white overflow-hidden focus-within:border-[var(--ck-black)]">
-                  <div className="px-5 py-5 text-2xl font-mono tracking-wider bg-[var(--ck-cream)] border-r border-[var(--ck-line)] text-[var(--ck-muted)]">
-                    CKM-
-                  </div>
-                  <input
-                    ref={inputRef}
-                    data-testid="kiosk-code-input"
-                    value={code}
-                    onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
-                    placeholder="10001"
-                    inputMode="numeric"
-                    className="min-w-0 flex-1 px-6 py-5 text-2xl text-center font-mono tracking-wider bg-white focus:outline-none"
-                    autoComplete="off"
-                  />
-                </div>
-
-                <div className="grid grid-cols-3 gap-2 mt-4">
-                  {["1", "2", "3", "4", "5", "6", "7", "8", "9"].map((k) => (
-                    <button key={k} type="button" onClick={() => pad(k)} className="py-4 text-xl font-semibold rounded-xl bg-white border border-[var(--ck-line)] hover:border-[var(--ck-black)] active:scale-[.97] transition">
-                      {k}
-                    </button>
-                  ))}
-                  <button type="button" onClick={() => pad("clear")} className="py-4 text-sm font-semibold rounded-xl bg-white border border-[var(--ck-line)] hover:border-red-400 hover:text-red-600">
-                    Clear
-                  </button>
-                  <button type="button" onClick={() => pad("0")} className="py-4 text-xl font-semibold rounded-xl bg-white border border-[var(--ck-line)] hover:border-[var(--ck-black)]">0</button>
-                  <button type="button" onClick={() => pad("back")} className="py-4 text-sm font-semibold rounded-xl bg-white border border-[var(--ck-line)] hover:border-[var(--ck-black)]">
-                    Back
-                  </button>
-                </div>
-
-                <button
-                  type="submit"
-                  disabled={busy || !code.replace(/\D/g, "")}
-                  data-testid="kiosk-submit"
-                  className="mt-5 w-full py-4 rounded-2xl text-base font-semibold bg-[var(--ck-black)] text-white hover:bg-[var(--ck-orange)] disabled:opacity-50 transition flex items-center justify-center gap-2"
-                >
-                  {busy ? <Loader2 size={18} className="animate-spin" /> : mode === "in" ? <LogIn size={18} /> : <LogOut size={18} />}
-                  {busy ? "Processing..." : mode === "in" ? "Check In" : "Check Out"}
-                </button>
-              </form>
             </div>
 
             {feedback && (
